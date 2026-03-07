@@ -63,16 +63,6 @@
 			path = StikJIT;
 			sourceTree = "<group>";
 		};
-		DC6F1D4B2D94EADF0071B2B6 /* StikJITTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = StikJITTests;
-			sourceTree = "<group>";
-		};
-		DC6F1D552D94EADF0071B2B6 /* StikJITUITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = StikJITUITests;
-			sourceTree = "<group>";
-		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -104,8 +94,6 @@
 			isa = PBXGroup;
 			children = (
 				DC6F1D392D94EADD0071B2B6 /* StikJIT */,
-				DC6F1D4B2D94EADF0071B2B6 /* StikJITTests */,
-				DC6F1D552D94EADF0071B2B6 /* StikJITUITests */,
 				DC6F1D752D94EB620071B2B6 /* Frameworks */,
 				DC6F1D382D94EADD0071B2B6 /* Products */,
 			);
@@ -169,9 +157,6 @@
 			dependencies = (
 				DC6F1D4A2D94EADF0071B2B6 /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				DC6F1D4B2D94EADF0071B2B6 /* StikJITTests */,
-			);
 			name = StikDebugTests;
 			packageProductDependencies = (
 			);
@@ -191,9 +176,6 @@
 			);
 			dependencies = (
 				DC6F1D542D94EADF0071B2B6 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				DC6F1D552D94EADF0071B2B6 /* StikJITUITests */,
 			);
 			name = StikDebugUITests;
 			packageProductDependencies = (
@@ -451,11 +433,10 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					);
+				FRAMEWORK_SEARCH_PATHS = "$(inherited)";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StikJIT/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = GhostPin;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Location Simulator needs local network access to connect to your device.";
@@ -479,9 +460,9 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/StikJIT/idevice",
 				);
-				INFOPLIST_KEY_CFBundleDisplayName = GhostPin;
 				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				MARKETING_VERSION = 3.0.0;
+				OTHER_CFLAGS = "-Wno-strict-prototypes";
 				PRODUCT_BUNDLE_IDENTIFIER = com.david.locationsimulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -491,7 +472,6 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "StikJIT/StikJIT-Bridging-Header.h";
-				OTHER_CFLAGS = "-Wno-strict-prototypes";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -515,11 +495,10 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					);
+				FRAMEWORK_SEARCH_PATHS = "$(inherited)";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StikJIT/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = GhostPin;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Location Simulator needs local network access to connect to your device.";
@@ -543,9 +522,9 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/StikJIT/idevice",
 				);
-				INFOPLIST_KEY_CFBundleDisplayName = GhostPin;
 				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				MARKETING_VERSION = 3.0.0;
+				OTHER_CFLAGS = "-Wno-strict-prototypes";
 				PRODUCT_BUNDLE_IDENTIFIER = com.david.locationsimulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -555,7 +534,6 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "StikJIT/StikJIT-Bridging-Header.h";
-				OTHER_CFLAGS = "-Wno-strict-prototypes";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				XROS_DEPLOYMENT_TARGET = 2.2;
