@@ -1,0 +1,972 @@
+//
+//  MapSelectionView.swift
+//  StikJIT
+//
+//  Created by Stephen on 11/3/25.
+//
+
+import SwiftUI
+import MapKit
+import UIKit
+
+extension CLLocationCoordinate2D: @retroactive Equatable {
+    public static func == (lhs: CLLocationCoordinate2D, rhs: CLLocationCoordinate2D) -> Bool {
+        lhs.latitude == rhs.latitude && lhs.longitude == rhs.longitude
+    }
+}
+
+struct RouteStopsView: View {
+    @Binding var routeStops: [LocationBookmark]
+    let bookmarks: [LocationBookmark]
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if routeStops.isEmpty {
+                    ContentUnavailableView(
+                        "No Route Stops",
+                        systemImage: "point.3.filled.connected.trianglepath.dotted",
+                        description: Text("Use Add Stop from the simulator screen or copy from bookmarks.")
+                    )
+                } else {
+                    ForEach(routeStops) { stop in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(stop.name)
+                            Text(String(format: "%.6f, %.6f", stop.latitude, stop.longitude))
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .onMove { fromOffsets, toOffset in
+                        routeStops.move(fromOffsets: fromOffsets, toOffset: toOffset)
+                    }
+                    .onDelete { offsets in
+                        routeStops.remove(atOffsets: offsets)
+                    }
+                }
+            }
+            .navigationTitle("Route Stops")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if !bookmarks.isEmpty {
+                        Button("Use Bookmarks") {
+                            routeStops = bookmarks
+                        }
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
+                }
+            }
+        }
+    }
+
+}
+
+// MARK: - Bookmark Model
+
+struct LocationBookmark: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var name: String
+    var latitude: Double
+    var longitude: Double
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+// MARK: - Search Completer
+
+@MainActor
+final class LocationSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
+    @Published var results: [MKLocalSearchCompletion] = []
+    private let completer = MKLocalSearchCompleter()
+
+    override init() {
+        super.init()
+        completer.delegate = self
+        completer.resultTypes = [.address, .pointOfInterest]
+    }
+
+    func update(query: String) {
+        completer.queryFragment = query
+    }
+
+    nonisolated func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        let results = completer.results
+        Task { @MainActor in self.results = results }
+    }
+
+    nonisolated func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
+        Task { @MainActor in self.results = [] }
+    }
+}
+
+struct LocationSimulationView: View {
+    // Serial queue: simulate_location and clear_simulated_location share C global
+    // state — serialising all calls eliminates the use-after-free race.
+    private static let locationQueue = DispatchQueue(label: "com.stik.location-sim",
+                                                    qos: .userInitiated)
+
+    private enum SimulationMode: String, CaseIterable, Identifiable {
+        case pin = "Pin"
+        case route = "Route"
+
+        var id: String { rawValue }
+    }
+
+    @AppStorage("routeStepInterval") private var routeStepInterval = 6.0
+    @AppStorage("routeLoopEnabled") private var routeLoopEnabled = true
+
+    @State private var coordinate: CLLocationCoordinate2D?
+    @State private var position: MapCameraPosition = .userLocation(fallback: .automatic)
+    @State private var pinDropped = false
+    @State private var shouldCenterOnCoordinate = false
+
+    @State private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    @State private var resendTimer: Timer?
+    @State private var isBusy = false
+    @State private var showAlert = false
+    @State private var alertTitle = ""
+    @State private var alertMessage = ""
+
+    @State private var searchText = ""
+    @StateObject private var searchCompleter = LocationSearchCompleter()
+
+    // Bookmarks
+    @State private var bookmarks: [LocationBookmark] = []
+    @State private var showBookmarks = false
+    @State private var showSaveBookmark = false
+    @State private var newBookmarkName = ""
+
+    // Route simulation
+    @State private var simulationMode: SimulationMode = .pin
+    @State private var routeStops: [LocationBookmark] = []
+    @State private var showRouteManager = false
+    @State private var routeTimer: Timer?
+    @State private var routeIndex = 0
+    @State private var isRouteRunning = false
+    @State private var pairingExists = false
+    @State private var operationID = UUID()
+    @State private var isSimulationActive = false
+
+    private var pairingFilePath: String {
+        URL.documentsDirectory.appendingPathComponent("pairingFile.plist").path
+    }
+
+    private func refreshPairingStatus() {
+        pairingExists = FileManager.default.fileExists(atPath: pairingFilePath)
+    }
+
+    private var deviceIP: String {
+        let stored = UserDefaults.standard.string(forKey: "customTargetIP") ?? ""
+        return stored.isEmpty ? "10.7.0.1" : stored
+    }
+
+    private var routeStatusText: String {
+        guard !routeStops.isEmpty else { return "No route stops yet" }
+        if isRouteRunning {
+            return "Running stop \(routeIndex + 1) of \(routeStops.count)"
+        }
+        return "\(routeStops.count) stops ready"
+    }
+
+    // MARK: - Extracted Subviews
+
+    private var mapLayer: some View {
+        MapReader { proxy in
+            Map(position: $position) {
+                if let coordinate {
+                    Annotation("", coordinate: coordinate, anchor: .bottom) {
+                        EquatableView(content: CustomPinView(isActive: isSimulationActive))
+                            .scaleEffect(pinDropped ? 1 : 0.3)
+                            .opacity(pinDropped ? 1 : 0)
+                            .animation(.spring(response: 0.35, dampingFraction: 0.55), value: pinDropped)
+                    }
+                }
+            }
+            .mapStyle(.standard(elevation: .flat))
+            .onTapGesture { point in
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                if let loc = proxy.convert(point, from: .local) {
+                    if coordinate == nil {
+                        pinDropped = false
+                        coordinate = loc
+                        withAnimation { pinDropped = true }
+                    } else {
+                        coordinate = loc
+                    }
+                }
+            }
+            .mapControls {
+                MapCompass()
+            }
+        }
+        .ignoresSafeArea()
+        .onChange(of: coordinate) { _, new in
+            guard shouldCenterOnCoordinate, let new else { return }
+            shouldCenterOnCoordinate = false
+            withAnimation(.easeInOut(duration: 0.4)) {
+                position = .region(MKCoordinateRegion(center: new, latitudinalMeters: 1000, longitudinalMeters: 1000))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var searchResultsList: some View {
+        if !searchCompleter.results.isEmpty {
+            if #available(iOS 26, *) {
+                searchList
+                    .glassEffect(in: .rect(cornerRadius: 12))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            } else {
+                searchList
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
+        }
+    }
+
+    private var searchList: some View {
+        List(searchCompleter.results.prefix(5), id: \.self) { result in
+            Button {
+                selectSearchResult(result)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(result.title)
+                        .font(.subheadline)
+                    if !result.subtitle.isEmpty {
+                        Text(result.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .frame(maxHeight: 350)
+        .scrollDisabled(true)
+    }
+
+    private func modeChip(_ mode: SimulationMode) -> some View {
+        let isActive = simulationMode == mode
+        return Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                simulationMode = mode
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: mode == .pin ? "mappin.and.ellipse" : "point.3.connected.trianglepath.dotted")
+                    .font(.caption)
+                Text(mode.rawValue)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .foregroundStyle(isActive ? .white : .primary)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(
+                        isActive
+                            ? LinearGradient(
+                                colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            : LinearGradient(
+                                colors: [Color.white.opacity(0.20), Color.white.opacity(0.08)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var controlPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                modeChip(.pin)
+                modeChip(.route)
+            }
+            .padding(4)
+            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            if !pairingExists {
+                Label("No pairing file — import in Settings", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
+
+            if let coord = coordinate {
+                HStack(spacing: 6) {
+                    Text(String(format: "%.6f, %.6f", coord.latitude, coord.longitude))
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.secondary)
+                    if isSimulationActive {
+                        Text("LIVE")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.green, in: Capsule())
+                    }
+                    if isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+            } else {
+                Text("Tap map to drop pin")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if simulationMode == .pin {
+                pinControls
+            } else {
+                routeControls
+            }
+        }
+        .padding(18)
+        .background {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.18), Color.black.opacity(0.08)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                }
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        }
+        .padding(.bottom, 24)
+        .padding(.horizontal, 16)
+    }
+
+    private var pinControls: some View {
+        HStack(spacing: 10) {
+            Button(action: clear) {
+                Label("Stop", systemImage: "stop.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
+            .background(Color.red.opacity(0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .foregroundStyle(.red)
+
+            Button(action: simulatePin) {
+                Label("Simulate", systemImage: "location.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .foregroundStyle(.white)
+            .disabled(!pairingExists || isBusy || coordinate == nil)
+            .opacity((!pairingExists || isBusy || coordinate == nil) ? 0.45 : 1)
+
+            Button {
+                showSaveBookmark = true
+            } label: {
+                Image(systemName: "bookmark.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 44, height: 44)
+                    .background(Color.blue.opacity(0.18), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(.blue)
+            }
+            .buttonStyle(.plain)
+            .disabled(coordinate == nil)
+            .opacity(coordinate == nil ? 0.45 : 1)
+        }
+    }
+
+    private var routeControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(routeStatusText)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Button {
+                    if isRouteRunning {
+                        stopRouteStepping(keepSimulationAlive: true)
+                    } else {
+                        startRoute()
+                    }
+                } label: {
+                    Label(isRouteRunning ? "Pause Route" : "Start Route", systemImage: isRouteRunning ? "pause.fill" : "play.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+                .background(
+                    LinearGradient(
+                        colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
+                .foregroundStyle(.white)
+                .disabled(!pairingExists || routeStops.isEmpty)
+                .opacity((!pairingExists || routeStops.isEmpty) ? 0.45 : 1)
+
+                Button(action: clear) {
+                    Label("Stop", systemImage: "stop.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+                .background(Color.red.opacity(0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .foregroundStyle(.red)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    addCurrentCoordinateToRoute()
+                } label: {
+                    Label("Add Stop", systemImage: "plus")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .disabled(coordinate == nil)
+                .opacity(coordinate == nil ? 0.45 : 1)
+
+                Button {
+                    showRouteManager = true
+                } label: {
+                    Label("Manage", systemImage: "slider.horizontal.3")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+    }
+
+    // MARK: - Body
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            mapLayer
+            VStack(spacing: 12) {
+                searchResultsList
+                Spacer()
+                controlPanel
+            }
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    Button {
+                        showBookmarks = true
+                    } label: {
+                        Label("Bookmarks", systemImage: "bookmark.fill")
+                    }
+                    Button {
+                        showRouteManager = true
+                    } label: {
+                        Label("Route Stops", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                    }
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                TextField("Search location...", text: $searchText)
+                    .padding(.leading, 6)
+                    .autocorrectionDisabled()
+                    .onChange(of: searchText) { _, newValue in
+                        searchCompleter.update(query: newValue)
+                    }
+            }
+        }
+        .alert(alertTitle, isPresented: $showAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(alertMessage)
+        }
+        .alert("Save Bookmark", isPresented: $showSaveBookmark) {
+            TextField("Name", text: $newBookmarkName)
+            Button("Save") { addBookmark() }
+            Button("Cancel", role: .cancel) { newBookmarkName = "" }
+        } message: {
+            Text("Enter a name for this location.")
+        }
+        .sheet(isPresented: $showBookmarks) {
+            BookmarksView(bookmarks: $bookmarks) { bookmark in
+                pinDropped = false
+                shouldCenterOnCoordinate = true
+                coordinate = bookmark.coordinate
+                withAnimation { pinDropped = true }
+                showBookmarks = false
+            } onDelete: { offsets in
+                bookmarks.remove(atOffsets: offsets)
+                saveBookmarks()
+            }
+        }
+        .sheet(isPresented: $showRouteManager) {
+            RouteStopsView(routeStops: $routeStops, bookmarks: bookmarks)
+        }
+        .onAppear {
+            refreshPairingStatus()
+            loadBookmarks()
+            loadRouteStops()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pairingFileImported)) { _ in
+            refreshPairingStatus()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            refreshPairingStatus()
+        }
+        .onChange(of: routeStops) { _, _ in
+            saveRouteStops()
+        }
+        .onDisappear {
+            stopResendLoop()
+            stopRouteStepping(keepSimulationAlive: false)
+            BackgroundAudioManager.shared.stop()
+            BackgroundLocationManager.shared.requestStop()
+            endBackgroundTask()
+        }
+    }
+
+    // MARK: - Bookmarks
+
+    private func loadBookmarks() {
+        guard let data = UserDefaults.standard.data(forKey: "locationBookmarks"),
+              let decoded = try? JSONDecoder().decode([LocationBookmark].self, from: data) else { return }
+        bookmarks = decoded
+    }
+
+    private func saveBookmarks() {
+        if let data = try? JSONEncoder().encode(bookmarks) {
+            UserDefaults.standard.set(data, forKey: "locationBookmarks")
+        }
+    }
+
+    private func addBookmark() {
+        guard let coord = coordinate else { return }
+        let name = newBookmarkName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bookmark = LocationBookmark(
+            name: name.isEmpty ? String(format: "%.4f, %.4f", coord.latitude, coord.longitude) : name,
+            latitude: coord.latitude,
+            longitude: coord.longitude
+        )
+        bookmarks.append(bookmark)
+        saveBookmarks()
+        newBookmarkName = ""
+    }
+
+    private func loadRouteStops() {
+        guard let data = UserDefaults.standard.data(forKey: "routeStops"),
+              let decoded = try? JSONDecoder().decode([LocationBookmark].self, from: data) else {
+            return
+        }
+        routeStops = decoded
+    }
+
+    private func saveRouteStops() {
+        if let data = try? JSONEncoder().encode(routeStops) {
+            UserDefaults.standard.set(data, forKey: "routeStops")
+        }
+    }
+
+    private func addCurrentCoordinateToRoute() {
+        guard let coord = coordinate else { return }
+        let stop = LocationBookmark(
+            name: "Stop \(routeStops.count + 1)",
+            latitude: coord.latitude,
+            longitude: coord.longitude
+        )
+        routeStops.append(stop)
+    }
+
+    // MARK: - Location
+
+    private func selectSearchResult(_ result: MKLocalSearchCompletion) {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        searchText = ""
+        searchCompleter.results = []
+
+        let request = MKLocalSearch.Request(completion: result)
+        MKLocalSearch(request: request).start { response, _ in
+            if let item = response?.mapItems.first {
+                pinDropped = false
+                shouldCenterOnCoordinate = true
+                coordinate = item.placemark.coordinate
+                withAnimation { pinDropped = true }
+            }
+        }
+    }
+
+    private func simulatePin() {
+        guard pairingExists, let coord = coordinate, !isBusy else { return }
+        guard ensureSimulationReady() else { return }
+        isBusy = true
+        stopRouteStepping(keepSimulationAlive: false)
+        let currentOp = UUID()
+        operationID = currentOp
+        submitSimulation(for: coord) { code in
+            guard operationID == currentOp else { return }
+            isBusy = false
+            if code == 0 {
+                isSimulationActive = true
+                beginBackgroundTask()
+                startResendLoop()
+                if UserDefaults.standard.bool(forKey: "keepAliveAudio") {
+                    BackgroundAudioManager.shared.start()
+                }
+                BackgroundLocationManager.shared.requestStart()
+            } else {
+                alertTitle = "Simulation Failed"
+                alertMessage = "Could not simulate location (error \(code)). Make sure the device is connected and the DDI is mounted."
+                showAlert = true
+            }
+        }
+    }
+
+    private func startRoute() {
+        guard pairingExists else { return }
+        guard !routeStops.isEmpty else {
+            alertTitle = "Route Empty"
+            alertMessage = "Add at least one stop before starting a route."
+            showAlert = true
+            return
+        }
+        guard ensureSimulationReady() else { return }
+
+        stopResendLoop()
+        isBusy = true
+
+        if routeIndex >= routeStops.count {
+            routeIndex = 0
+        }
+
+        let firstStop = routeStops[routeIndex]
+        coordinate = firstStop.coordinate
+        let currentOp = UUID()
+        operationID = currentOp
+
+        submitSimulation(for: firstStop.coordinate) { code in
+            guard operationID == currentOp else { return }
+            isBusy = false
+            if code == 0 {
+                isSimulationActive = true
+                beginBackgroundTask()
+                if UserDefaults.standard.bool(forKey: "keepAliveAudio") {
+                    BackgroundAudioManager.shared.start()
+                }
+                BackgroundLocationManager.shared.requestStart()
+                isRouteRunning = true
+                scheduleRouteTimer()
+            } else {
+                alertTitle = "Route Start Failed"
+                alertMessage = "Could not start route simulation (error \(code))."
+                showAlert = true
+            }
+        }
+    }
+
+    private func scheduleRouteTimer() {
+        routeTimer?.invalidate()
+        let interval = max(routeStepInterval, 2)
+        routeTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+            advanceRoute()
+        }
+    }
+
+    private func advanceRoute() {
+        guard isRouteRunning, !routeStops.isEmpty else { return }
+
+        var nextIndex = routeIndex + 1
+        if nextIndex >= routeStops.count {
+            if routeLoopEnabled {
+                nextIndex = 0
+            } else {
+                stopRouteStepping(keepSimulationAlive: true)
+                alertTitle = "Route Complete"
+                alertMessage = "Reached the final route stop."
+                showAlert = true
+                return
+            }
+        }
+
+        routeIndex = nextIndex
+        let nextStop = routeStops[nextIndex]
+        coordinate = nextStop.coordinate
+
+        let currentOp = operationID
+        submitSimulation(for: nextStop.coordinate) { code in
+            guard operationID == currentOp else { return }
+            if code != 0 {
+                stopRouteStepping(keepSimulationAlive: true)
+                alertTitle = "Route Step Failed"
+                alertMessage = "Failed at stop \(nextIndex + 1) (error \(code))."
+                showAlert = true
+            }
+        }
+    }
+
+    private func stopRouteStepping(keepSimulationAlive: Bool) {
+        routeTimer?.invalidate()
+        routeTimer = nil
+        isRouteRunning = false
+        if keepSimulationAlive, coordinate != nil {
+            startResendLoop()
+        }
+    }
+
+    private func submitSimulation(for coord: CLLocationCoordinate2D, completion: @escaping (Int32) -> Void) {
+        let ip = deviceIP
+        let path = pairingFilePath
+        let lat = coord.latitude
+        let lon = coord.longitude
+        Self.locationQueue.async {
+            start_simulation()  // resets g_stopping on the queue thread — no race
+            let code = simulate_location(ip, lat, lon, path)
+            DispatchQueue.main.async {
+                completion(code)
+            }
+        }
+    }
+
+    private func ensureSimulationReady() -> Bool {
+        let targetIP = deviceIP
+        guard !targetIP.isEmpty else {
+            alertTitle = "Missing Target IP"
+            alertMessage = "Set a target IP in Settings before simulating."
+            showAlert = true
+            return false
+        }
+
+        guard FileManager.default.fileExists(atPath: pairingFilePath), isPairing() else {
+            pairingExists = false
+            alertTitle = "Invalid Pairing File"
+            alertMessage = "Import a valid pairingFile.plist in Settings, then try again."
+            showAlert = true
+            return false
+        }
+
+        guard isMounted() else {
+            MountingProgress.shared.pubMount()
+            alertTitle = "Preparing Device Support"
+            alertMessage = "Developer Disk Image is not mounted yet. Please wait a few seconds and try Simulate again."
+            showAlert = true
+            return false
+        }
+
+        return true
+    }
+
+    private func clear() {
+
+        // Invalidate any in-flight operations so their callbacks become no-ops
+        operationID = UUID()
+
+        // Stop all timers immediately
+        stopResendLoop()
+        stopRouteStepping(keepSimulationAlive: false)
+
+        // Reset UI state right away — don't wait for the C call
+        isBusy = false
+        isSimulationActive = false
+        coordinate = nil
+        endBackgroundTask()
+        BackgroundAudioManager.shared.stop()
+        BackgroundLocationManager.shared.requestStop()
+
+        // Set the stop flag from the main thread (atomic store — no handle access,
+        // so no race). The in-flight simulate_location on the serial queue will see
+        // the flag at its next BAIL_IF_STOPPING() check and clean up itself.
+        // clear_simulated_location() is then queued to run after it finishes.
+        cancel_simulation()
+        Self.locationQueue.async {
+            _ = clear_simulated_location()
+        }
+    }
+
+    private func beginBackgroundTask() {
+        guard backgroundTaskID == .invalid else { return }
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask { [self] in
+            stopResendLoop()
+            stopRouteStepping(keepSimulationAlive: false)
+            BackgroundAudioManager.shared.stop()
+            BackgroundLocationManager.shared.requestStop()
+            endBackgroundTask()
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+        backgroundTaskID = .invalid
+    }
+
+    private func startResendLoop() {
+        guard !isRouteRunning else { return }
+        resendTimer?.invalidate()
+        resendTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { _ in
+            guard let coord = coordinate, isSimulationActive else { return }
+            let ip = deviceIP
+            let path = pairingFilePath
+            let lat = coord.latitude
+            let lon = coord.longitude
+            Self.locationQueue.async {
+                _ = simulate_location(ip, lat, lon, path)
+            }
+        }
+    }
+
+    private func stopResendLoop() {
+        resendTimer?.invalidate()
+        resendTimer = nil
+    }
+}
+
+// MARK: - Custom Pin
+
+struct CustomPinView: View, Equatable {
+    var isActive: Bool
+
+    static func == (lhs: CustomPinView, rhs: CustomPinView) -> Bool {
+        lhs.isActive == rhs.isActive
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                // Glow ring when simulation is live
+                if isActive {
+                    Circle()
+                        .stroke(Color.green.opacity(0.5), lineWidth: 3)
+                        .frame(width: 48, height: 48)
+                }
+
+                // Outer pin body
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: isActive
+                                ? [Color(red: 0.18, green: 0.82, blue: 0.58), Color(red: 0.12, green: 0.62, blue: 0.90)]
+                                : [Color(red: 0.93, green: 0.30, blue: 0.32), Color(red: 0.82, green: 0.18, blue: 0.40)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 38, height: 38)
+
+                // Inner icon
+                Image(systemName: isActive ? "location.fill" : "mappin")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+
+            // Pin tail
+            Triangle()
+                .fill(
+                    LinearGradient(
+                        colors: isActive
+                            ? [Color(red: 0.12, green: 0.62, blue: 0.90), Color(red: 0.12, green: 0.62, blue: 0.90).opacity(0.5)]
+                            : [Color(red: 0.82, green: 0.18, blue: 0.40), Color(red: 0.82, green: 0.18, blue: 0.40).opacity(0.5)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: 14, height: 10)
+                .offset(y: -2)
+
+            // Ground shadow dot
+            Ellipse()
+                .fill(Color.black.opacity(0.18))
+                .frame(width: 18, height: 6)
+                .offset(y: 2)
+        }
+        .compositingGroup()
+    }
+}
+
+// Pin tail shape
+private struct Triangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+// MARK: - Bookmarks Sheet
+
+struct BookmarksView: View {
+    @Binding var bookmarks: [LocationBookmark]
+    let onSelect: (LocationBookmark) -> Void
+    let onDelete: (IndexSet) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if bookmarks.isEmpty {
+                    ContentUnavailableView(
+                        "No Bookmarks",
+                        systemImage: "bookmark.slash",
+                        description: Text("Drop a pin on the map and tap the bookmark icon to save a location.")
+                    )
+                } else {
+                    List {
+                        ForEach(bookmarks) { bookmark in
+                            Button {
+                                onSelect(bookmark)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(bookmark.name)
+                                        .foregroundStyle(.primary)
+                                    Text(String(format: "%.6f, %.6f", bookmark.latitude, bookmark.longitude))
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .onDelete(perform: onDelete)
+                    }
+                }
+            }
+            .navigationTitle("Bookmarks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if !bookmarks.isEmpty {
+                    EditButton()
+                }
+            }
+        }
+    }
+}
