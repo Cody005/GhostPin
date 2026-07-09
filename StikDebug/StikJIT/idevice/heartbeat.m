@@ -16,80 +16,74 @@
 int globalHeartbeatToken = 0;
 NSDate* lastHeartbeatDate = nil;
 
-void startHeartbeat(IdevicePairingFile* pairing_file, IdeviceProviderHandle** provider, int heartbeatToken, HeartbeatCompletionHandlerC completion) {
-    IdeviceProviderHandle* newProvider = *provider;
+// RemotePairing (RPPairing) service port. Unlike the old CoreDeviceProxy
+// path (lockdownd, port 62078), this connects directly to the on-device
+// RemotePairing listener, which is not subject to iOS 26.4+'s lockdownd
+// VPN-netmask restriction on utun connections.
+#define RPPAIRING_PORT 49152
+
+// Writes directly to stderr (visible via `devicectl device process launch
+// --console` or an attached debugger), unlike NSLog which routes through
+// the unified logging system and may not be visible over a remote console.
+#define GP_LOG(fmt, ...) do { fprintf(stderr, "[GhostPin] " fmt "\n", ##__VA_ARGS__); fflush(stderr); } while (0)
+
+// Establishes the RemotePairing tunnel exactly once (no continuous
+// marco/polo keep-alive loop needed for RPPairing sessions, unlike the old
+// lockdownd heartbeat protocol). Callers only invoke this when there is no
+// cached tunnel yet (see -[JITEnableContext ensureHeartbeatWithError:]), and
+// the resulting adapter/handshake are cached and reused by all subsequent
+// RSD-based calls (mount, etc) until the app restarts or the tunnel errors.
+void startHeartbeat(RpPairingFileHandle* pairing_file, AdapterHandle** adapter, RsdHandshakeHandle** handshake, int heartbeatToken, HeartbeatCompletionHandlerC completion) {
     IdeviceFfiError* err = nil;
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(LOCKDOWN_PORT);
+    addr.sin_port = htons(RPPAIRING_PORT);
 
     NSString* deviceIP = [[NSUserDefaults standardUserDefaults] stringForKey:@"customTargetIP"];
     inet_pton(AF_INET, (deviceIP && deviceIP.length > 0) ? [deviceIP UTF8String] : "10.7.0.1", &addr.sin_addr);
 
-    err = idevice_tcp_provider_new((struct sockaddr *)&addr, pairing_file,
-                                   "ExampleProvider", &newProvider);
+    GP_LOG("startHeartbeat: creating RPPairing tunnel to %s:%d", (deviceIP && deviceIP.length > 0) ? [deviceIP UTF8String] : "10.7.0.1", RPPAIRING_PORT);
+    AdapterHandle* newAdapter = NULL;
+    RsdHandshakeHandle* newHandshake = NULL;
+    err = tunnel_create_rppairing((struct sockaddr *)&addr,
+                                  sizeof(addr),
+                                  "GhostPinHeartbeat",
+                                  pairing_file,
+                                  NULL,
+                                  NULL,
+                                  &newAdapter,
+                                  &newHandshake);
+    // pairing_file is borrowed (not consumed) by tunnel_create_rppairing.
+    rp_pairing_file_free(pairing_file);
     if (err != NULL) {
+        GP_LOG("tunnel_create_rppairing FAILED: code=%d message=%s", err->code, err->message);
         completion(err->code, err->message);
-        idevice_pairing_file_free(pairing_file);
         idevice_error_free(err);
         return;
     }
+    GP_LOG("tunnel_create_rppairing succeeded");
 
+    // Sanity-check the tunnel is actually usable before caching it.
     HeartbeatClientHandle *client = NULL;
-    err = heartbeat_connect(newProvider, &client);
+    err = heartbeat_connect_rsd(newAdapter, newHandshake, &client);
     if (err != NULL) {
+        GP_LOG("heartbeat_connect_rsd FAILED: code=%d message=%s", err->code, err->message);
         completion(err->code, err->message);
-        idevice_provider_free(newProvider);
+        rsd_handshake_free(newHandshake);
+        adapter_free(newAdapter);
         idevice_error_free(err);
         return;
     }
+    GP_LOG("heartbeat_connect_rsd succeeded");
+    heartbeat_client_free(client);
 
-    *provider = newProvider;
+    if (*handshake) { rsd_handshake_free(*handshake); }
+    if (*adapter)   { adapter_free(*adapter); }
+    *adapter   = newAdapter;
+    *handshake = newHandshake;
 
-    bool completionCalled = false;
-    u_int64_t current_interval = 15;
-
-    while (1) {
-        u_int64_t new_interval = 0;
-        err = heartbeat_get_marco(client, current_interval, &new_interval);
-        if (err != NULL) {
-            if (!completionCalled) {
-                completion(err->code, err->message);
-            }
-            heartbeat_client_free(client);
-            idevice_error_free(err);
-            return;
-        }
-
-        // If a newer heartbeat thread has started, yield to it
-        if (heartbeatToken != globalHeartbeatToken) {
-            heartbeat_client_free(client);
-            return;
-        }
-
-        current_interval = new_interval + 5;
-
-        err = heartbeat_send_polo(client);
-        if (err != NULL) {
-            if (!completionCalled) {
-                completion(err->code, err->message);
-            }
-            heartbeat_client_free(client);
-            idevice_error_free(err);
-            return;
-        }
-
-        if (lastHeartbeatDate && [[NSDate now] timeIntervalSinceDate:lastHeartbeatDate] > current_interval) {
-            lastHeartbeatDate = nil;
-            return;
-        }
-        lastHeartbeatDate = [NSDate now];
-
-        if (!completionCalled) {
-            completion(0, "Heartbeat succeeded");
-            completionCalled = true;
-        }
-    }
+    lastHeartbeatDate = [NSDate now];
+    completion(0, "Tunnel connected");
 }

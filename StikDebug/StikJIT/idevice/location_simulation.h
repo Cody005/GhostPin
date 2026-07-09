@@ -18,12 +18,7 @@ extern "C" {
 #define IPA_OK                     0
 #define IPA_ERR_INVALID_IP         1
 #define IPA_ERR_PAIRING_READ       2
-#define IPA_ERR_PROVIDER_CREATE    3
-#define IPA_ERR_CORE_DEVICE        4
-#define IPA_ERR_RSD_PORT           5
-#define IPA_ERR_ADAPTER_CREATE     6
-#define IPA_ERR_STREAM             7
-#define IPA_ERR_HANDSHAKE          8
+#define IPA_ERR_RPPAIRING_TUNNEL   3
 #define IPA_ERR_REMOTE_SERVER      9
 #define IPA_ERR_LOCATION_SIM      10
 #define IPA_ERR_LOCATION_SET      11

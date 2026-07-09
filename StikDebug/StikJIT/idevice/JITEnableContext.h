@@ -19,8 +19,14 @@ typedef void (^SyslogErrorHandler)(NSError *error);
 @interface JITEnableContext : NSObject {
     // process
     @protected dispatch_queue_t processInspectorQueue;
-    @protected IdeviceProviderHandle* provider;
-        
+
+    // RemotePairing tunnel (adapter + RSD handshake). Cached and reused
+    // across all RSD-based services (mount, etc) once established, matching
+    // upstream StikDebug's ensureTunnel()/startTunnel() design. Replaces the
+    // old lockdownd-VPN IdeviceProviderHandle, which iOS 26.4+ blocks.
+    @protected AdapterHandle*      g_adapter;
+    @protected RsdHandshakeHandle* g_handshake;
+
     // syslog
     @protected dispatch_queue_t syslogQueue;
     @protected BOOL syslogStreaming;
@@ -32,8 +38,9 @@ typedef void (^SyslogErrorHandler)(NSError *error);
     @protected LockdowndClientHandle *   g_client;
 }
 @property (class, readonly)JITEnableContext* shared;
-- (IdevicePairingFile*)getPairingFileWithError:(NSError**)error;
-- (IdeviceProviderHandle*)getTcpProviderHandle;
+- (RpPairingFileHandle*)getPairingFileWithError:(NSError**)error;
+- (AdapterHandle*)getTunnelAdapterHandle;
+- (RsdHandshakeHandle*)getTunnelHandshakeHandle;
 - (BOOL)ensureHeartbeatWithError:(NSError**)err;
 - (BOOL)startHeartbeat:(NSError**)err;
 

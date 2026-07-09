@@ -84,19 +84,27 @@ class MountingProgress: ObservableObject {
 
     private func mountIfNeeded() {
         let currentlyMounted = isMounted()
+        print("[GhostPin] mountIfNeeded: isPairing=\(isPairing()) currentlyMounted=\(currentlyMounted)")
+        fflush(stdout)
         DispatchQueue.main.async { self.coolisMounted = currentlyMounted }
         guard isPairing(), !currentlyMounted else { return }
 
         mountingThread?.cancel()
         mountingThread = nil
 
+        let imagePath = URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg").path
+        let trustcachePath = URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg.trustcache").path
+        let manifestPath = URL.documentsDirectory.appendingPathComponent("DDI/BuildManifest.plist").path
+
         let thread = Thread { [weak self] in
             guard let self else { return }
             let err = mountPersonalDDI(
-                imagePath: URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg").path,
-                trustcachePath: URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg.trustcache").path,
-                manifestPath: URL.documentsDirectory.appendingPathComponent("DDI/BuildManifest.plist").path
+                imagePath: imagePath,
+                trustcachePath: trustcachePath,
+                manifestPath: manifestPath
             )
+            print("[GhostPin] mountIfNeeded: mountPersonalDDI returned error=\(err ?? "nil")")
+            fflush(stdout)
             DispatchQueue.main.async {
                 if let err {
                     showAlert(title: "DDI Mount Failed", message: err, showOk: true, showTryAgain: true) { retry in

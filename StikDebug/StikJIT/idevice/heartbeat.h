@@ -17,5 +17,5 @@ typedef void (^LogFuncC)(const char* message, ...);
 extern int globalHeartbeatToken;
 extern NSDate* lastHeartbeatDate;
 
-void startHeartbeat(IdevicePairingFile* pairing_file, IdeviceProviderHandle** provider, int heartbeatToken, HeartbeatCompletionHandlerC completion);
+void startHeartbeat(RpPairingFileHandle* pairing_file, AdapterHandle** adapter, RsdHandshakeHandle** handshake, int heartbeatToken, HeartbeatCompletionHandlerC completion);
 #endif /* HEARTBEAT_H */

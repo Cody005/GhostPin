@@ -70,7 +70,7 @@ static JITEnableContext* sharedJITContext = nil;
     };
 }
 
-- (IdevicePairingFile*)getPairingFileWithError:(NSError**)error {
+- (RpPairingFileHandle*)getPairingFileWithError:(NSError**)error {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSURL* docPathUrl = [fm URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL* pairingFileURL = [docPathUrl URLByAppendingPathComponent:@"pairingFile.plist"];
@@ -80,8 +80,8 @@ static JITEnableContext* sharedJITContext = nil;
         return nil;
     }
 
-    IdevicePairingFile* pairingFile = NULL;
-    IdeviceFfiError* err = idevice_pairing_file_read(pairingFileURL.fileSystemRepresentation, &pairingFile);
+    RpPairingFileHandle* pairingFile = NULL;
+    IdeviceFfiError* err = rp_pairing_file_read(pairingFileURL.fileSystemRepresentation, &pairingFile);
     if (err) {
         *error = [self errorWithStr:@"Failed to read pairing file!" code:err->code];
         idevice_error_free(err);
@@ -90,10 +90,20 @@ static JITEnableContext* sharedJITContext = nil;
     return pairingFile;
 }
 
-- (IdeviceProviderHandle*)getTcpProviderHandle {
-    return provider;
+- (AdapterHandle*)getTunnelAdapterHandle {
+    return g_adapter;
 }
 
+- (RsdHandshakeHandle*)getTunnelHandshakeHandle {
+    return g_handshake;
+}
+
+// Establishes the RemotePairing tunnel exactly once and caches adapter +
+// handshake for reuse by every RSD-based service (mount, etc). Unlike the
+// old per-call lockdown-VPN reconnect, this mirrors upstream StikDebug's
+// ensureTunnel()/startTunnel() — reconnecting on every call was causing
+// mount-then-immediately-recheck races where the freshly mounted DDI wasn't
+// visible yet on the brand new tunnel session.
 - (BOOL)startHeartbeat:(NSError**)err {
     os_unfair_lock_lock(&heartbeatLock);
 
@@ -114,7 +124,7 @@ static JITEnableContext* sharedJITContext = nil;
     dispatch_semaphore_t completionSemaphore = heartbeatSemaphore;
     os_unfair_lock_unlock(&heartbeatLock);
 
-    IdevicePairingFile* pairingFile = [self getPairingFileWithError:err];
+    RpPairingFileHandle* pairingFile = [self getPairingFileWithError:err];
     if (*err) {
         os_unfair_lock_lock(&heartbeatLock);
         heartbeatRunning = NO;
@@ -142,12 +152,12 @@ static JITEnableContext* sharedJITContext = nil;
     };
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        startHeartbeat(pairingFile, &self->provider, globalHeartbeatToken, Ccompletion);
+        startHeartbeat(pairingFile, &self->g_adapter, &self->g_handshake, globalHeartbeatToken, Ccompletion);
     });
 
     intptr_t isTimeout = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (uint64_t)(5 * NSEC_PER_SEC)));
     if (isTimeout) {
-        Ccompletion(-1, "Heartbeat failed to complete in reasonable time.");
+        Ccompletion(-1, "Tunnel failed to connect in reasonable time.");
     }
 
     *err = blockError;
@@ -162,15 +172,22 @@ static JITEnableContext* sharedJITContext = nil;
 }
 
 - (BOOL)ensureHeartbeatWithError:(NSError**)err {
-    if (!lastHeartbeatDate || [[NSDate now] timeIntervalSinceDate:lastHeartbeatDate] > 15) {
-        return [self startHeartbeat:err];
+    // Reuse the cached tunnel if we already have one — do NOT reconnect on
+    // every call. Reconnecting per-call was the root cause of the DDI mount
+    // succeeding but immediately reading back as "not mounted": each check
+    // was happening on a brand new tunnel session.
+    if (g_adapter && g_handshake) {
+        return YES;
     }
-    return YES;
+    return [self startHeartbeat:err];
 }
 
 - (void)dealloc {
-    if (provider) {
-        idevice_provider_free(provider);
+    if (g_handshake) {
+        rsd_handshake_free(g_handshake);
+    }
+    if (g_adapter) {
+        adapter_free(g_adapter);
     }
 }
 
