@@ -107,8 +107,13 @@ final class LocationSearchCompleter: NSObject, ObservableObject, MKLocalSearchCo
 struct LocationSimulationView: View {
     // Serial queue: simulate_location and clear_simulated_location share C global
     // state — serialising all calls eliminates the use-after-free race.
+    // QoS is .utility (not .userInitiated): simulate_location() blocks
+    // synchronously on Rust-internal worker threads that run at the OS
+    // default QoS, so boosting this queue above that just causes a
+    // priority inversion (boosted thread parked on a default-QoS thread)
+    // with no actual benefit, since we're blocked either way.
     private static let locationQueue = DispatchQueue(label: "com.stik.location-sim",
-                                                    qos: .userInitiated)
+                                                    qos: .utility)
 
     private enum SimulationMode: String, CaseIterable, Identifiable {
         case pin = "Pin"
