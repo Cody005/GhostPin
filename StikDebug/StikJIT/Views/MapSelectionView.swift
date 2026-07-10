@@ -634,6 +634,12 @@ struct LocationSimulationView: View {
 
     private func simulatePin() {
         guard pairingExists, let coord = coordinate, !isBusy else { return }
+        if isActiveConnectionCellular() {
+            alertTitle = "Cellular Network Active"
+            alertMessage = "Location simulation requires the same WiFi network as your Mac/development peer. LocalDevVPN cannot reach the RemotePairing listener over cellular data."
+            showAlert = true
+            return
+        }
         guard ensureSimulationReady() else { return }
         isBusy = true
         stopRouteStepping(keepSimulationAlive: false)
@@ -663,6 +669,12 @@ struct LocationSimulationView: View {
         guard !routeStops.isEmpty else {
             alertTitle = "Route Empty"
             alertMessage = "Add at least one stop before starting a route."
+            showAlert = true
+            return
+        }
+        if isActiveConnectionCellular() {
+            alertTitle = "Cellular Network Active"
+            alertMessage = "Route simulation requires the same WiFi network as your Mac/development peer. LocalDevVPN cannot reach the RemotePairing listener over cellular data."
             showAlert = true
             return
         }

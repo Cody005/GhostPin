@@ -263,7 +263,7 @@ struct SimulationSettingsView: View {
             isTestingConnection = false
             connectionStatusIsError = !isReachable
             if isReachable {
-                connectionStatusMessage = "Device reachable at \(resolvedIP):62078"
+                connectionStatusMessage = "Device reachable at \(resolvedIP):49152 (RemotePairing)"
             } else {
                 connectionStatusMessage = message ?? "Connection test failed."
             }

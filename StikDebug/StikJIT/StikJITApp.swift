@@ -9,6 +9,36 @@ import SwiftUI
 import Network
 import UniformTypeIdentifiers
 
+// MARK: - Network Path Monitoring
+
+private let networkPathMonitor = NWPathMonitor()
+private var lastNetworkPath: NWPath?
+
+/// Starts monitoring the active network path. Call once at app launch.
+func startNetworkPathMonitoring() {
+    networkPathMonitor.pathUpdateHandler = { path in
+        lastNetworkPath = path
+    }
+    networkPathMonitor.start(queue: DispatchQueue.global(qos: .utility))
+}
+
+/// Returns true if the current active path appears to be using cellular.
+/// Falls back to false if the path has not been determined yet.
+func isActiveConnectionCellular() -> Bool {
+    guard let path = lastNetworkPath else { return false }
+    return path.usesInterfaceType(.cellular)
+}
+
+/// Human-readable description of the active interface for diagnostics.
+func currentNetworkInterfaceDescription() -> String {
+    guard let path = lastNetworkPath else { return "unknown" }
+    if path.usesInterfaceType(.wifi) { return "WiFi" }
+    if path.usesInterfaceType(.cellular) { return "cellular" }
+    if path.usesInterfaceType(.wiredEthernet) { return "wired" }
+    if path.usesInterfaceType(.loopback) { return "loopback" }
+    return "other"
+}
+
 // Register default settings before the app starts
 private func registerAdvancedOptionsDefault() {
     UserDefaults.standard.register(defaults: ["keepAliveAudio": true])
@@ -25,6 +55,7 @@ struct LocationSimulatorApp: App {
 
     init() {
         registerAdvancedOptionsDefault()
+        startNetworkPathMonitoring()
         if let fixMethod  = class_getInstanceMethod(UIDocumentPickerViewController.self, #selector(UIDocumentPickerViewController.fix_init(forOpeningContentTypes:asCopy:))),
            let origMethod = class_getInstanceMethod(UIDocumentPickerViewController.self, #selector(UIDocumentPickerViewController.init(forOpeningContentTypes:asCopy:))) {
             method_exchangeImplementations(origMethod, fixMethod)
@@ -162,23 +193,37 @@ func isPairing() -> Bool {
 
 func checkDeviceConnection(callback: @escaping (Bool, String?) -> Void) {
     let targetIP = DeviceConnectionContext.targetIPAddress
+
+    // LocalDevVPN typically routes to a Mac/peer on the same local network.
+    // On cellular the VPN's outer interface is LTE and that peer is unreachable,
+    // which produces a TCP RST on 10.7.0.1:49152. Warn immediately so the user
+    // isn't left waiting 20s for a timeout that looks like a hung test.
+    if isActiveConnectionCellular() {
+        DispatchQueue.main.async {
+            callback(false, "Cellular data is active. Connect to the same WiFi network as your Mac/development peer and ensure LocalDevVPN is connected.")
+        }
+        return
+    }
+
     let host = NWEndpoint.Host(targetIP)
-    let port = NWEndpoint.Port(rawValue: 62078)!
+    // RemotePairing (RPPairing) port — matches heartbeat.m/location_simulation.c.
+    // Port 62078 (lockdownd) is blocked by iOS 26.4+'s VPN-netmask restriction.
+    let port = NWEndpoint.Port(rawValue: 49152)!
     let connection = NWConnection(host: host, port: port, using: .tcp)
     var timeoutWorkItem: DispatchWorkItem?
-    
+
     timeoutWorkItem = DispatchWorkItem { [weak connection] in
         if connection?.state != .ready {
             connection?.cancel()
             DispatchQueue.main.async {
                 if timeoutWorkItem?.isCancelled == false {
-                    let message = "[TIMEOUT] Could not reach the device at \(targetIP). Make sure it’s online and on the same network."
+                    let message = "[TIMEOUT] Could not reach the device at \(targetIP) over \(currentNetworkInterfaceDescription()). Make sure it’s online, on the same network, and LocalDevVPN is connected."
                     callback(false, message)
                 }
             }
         }
     }
-    
+
     connection.stateUpdateHandler = { [weak connection] state in
         switch state {
         case .ready:
@@ -194,11 +239,16 @@ func checkDeviceConnection(callback: @escaping (Bool, String?) -> Void) {
                 let message = "Could not reach the device at \(targetIP): \(error.localizedDescription)"
                 callback(false, message)
             }
+        case .waiting(let error):
+            // Log routing/permission-type problems for diagnostics instead of
+            // silently waiting for the generic timeout.
+            print("[GhostPin] checkDeviceConnection: waiting on \(targetIP):49152 over \(currentNetworkInterfaceDescription()) - \(error)")
+            fflush(stdout)
         default:
             break
         }
     }
-    
+
     connection.start(queue: .global())
     if let workItem = timeoutWorkItem {
         DispatchQueue.global().asyncAfter(deadline: .now() + 20, execute: workItem)
