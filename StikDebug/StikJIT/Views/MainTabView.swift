@@ -104,7 +104,7 @@ private struct WelcomeOverlay: View {
                     WelcomeRow(icon: "play.fill", text: "Hit Simulate to spoof your GPS — works across all apps instantly")
                     WelcomeRow(icon: "point.topleft.down.to.point.bottomright.curvepath", text: "Create routes with multiple stops for automated movement")
                     WelcomeRow(icon: "bookmark.fill", text: "Save your favourite locations as bookmarks for quick access")
-                    WelcomeRow(icon: "wifi", text: "Make sure LocalDevVPN is connected before simulating")
+                    WelcomeRow(icon: "wifi", text: "Connect LocalDevVPN before simulating. On cellular, start LocalDevVPN, enable Airplane Mode, then turn cellular back on")
                 }
                 .padding(.horizontal, 24)
 

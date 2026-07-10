@@ -9,6 +9,10 @@ import SwiftUI
 import Network
 import UniformTypeIdentifiers
 
+extension Notification.Name {
+    static let networkPathChanged = Notification.Name("com.ghostpin.networkPathChanged")
+}
+
 // MARK: - Network Path Monitoring
 
 private let networkPathMonitor = NWPathMonitor()
@@ -17,16 +21,21 @@ private var lastNetworkPath: NWPath?
 /// Starts monitoring the active network path. Call once at app launch.
 func startNetworkPathMonitoring() {
     networkPathMonitor.pathUpdateHandler = { path in
-        lastNetworkPath = path
+        DispatchQueue.main.async {
+            lastNetworkPath = path
+            NotificationCenter.default.post(name: .networkPathChanged, object: nil)
+        }
     }
     networkPathMonitor.start(queue: DispatchQueue.global(qos: .utility))
 }
 
-/// Returns true if the current active path appears to be using cellular.
+/// Returns true if the current active path appears to be using cellular and
+/// WiFi is not available. If both interfaces are up, iOS usually prefers WiFi
+/// for the LocalDevVPN tunnel, so we avoid a false-positive cellular warning.
 /// Falls back to false if the path has not been determined yet.
 func isActiveConnectionCellular() -> Bool {
     guard let path = lastNetworkPath else { return false }
-    return path.usesInterfaceType(.cellular)
+    return path.usesInterfaceType(.cellular) && !path.usesInterfaceType(.wifi)
 }
 
 /// Human-readable description of the active interface for diagnostics.
@@ -114,44 +123,47 @@ class MountingProgress: ObservableObject {
     }
 
     private func mountIfNeeded() {
-        let currentlyMounted = isMounted()
-        print("[GhostPin] mountIfNeeded: isPairing=\(isPairing()) currentlyMounted=\(currentlyMounted)")
-        fflush(stdout)
-        DispatchQueue.main.async { self.coolisMounted = currentlyMounted }
-        guard isPairing(), !currentlyMounted else { return }
-
-        mountingThread?.cancel()
-        mountingThread = nil
-
-        let imagePath = URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg").path
-        let trustcachePath = URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg.trustcache").path
-        let manifestPath = URL.documentsDirectory.appendingPathComponent("DDI/BuildManifest.plist").path
-
-        let thread = Thread { [weak self] in
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let err = mountPersonalDDI(
-                imagePath: imagePath,
-                trustcachePath: trustcachePath,
-                manifestPath: manifestPath
-            )
-            print("[GhostPin] mountIfNeeded: mountPersonalDDI returned error=\(err ?? "nil")")
+            let currentlyMounted = isMounted()
+            print("[GhostPin] mountIfNeeded: isPairing=\(isPairing()) currentlyMounted=\(currentlyMounted)")
             fflush(stdout)
-            DispatchQueue.main.async {
-                if let err {
-                    showAlert(title: "DDI Mount Failed", message: err, showOk: true, showTryAgain: true) { retry in
-                        if retry { self.mountIfNeeded() }
+            DispatchQueue.main.async { self.coolisMounted = currentlyMounted }
+            guard isPairing(), !currentlyMounted else { return }
+
+            self.mountingThread?.cancel()
+            self.mountingThread = nil
+
+            let imagePath = URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg").path
+            let trustcachePath = URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg.trustcache").path
+            let manifestPath = URL.documentsDirectory.appendingPathComponent("DDI/BuildManifest.plist").path
+
+            let thread = Thread { [weak self] in
+                guard let self else { return }
+                let err = mountPersonalDDI(
+                    imagePath: imagePath,
+                    trustcachePath: trustcachePath,
+                    manifestPath: manifestPath
+                )
+                print("[GhostPin] mountIfNeeded: mountPersonalDDI returned error=\(err ?? "nil")")
+                fflush(stdout)
+                DispatchQueue.main.async {
+                    if let err {
+                        showAlert(title: "DDI Mount Failed", message: err, showOk: true, showTryAgain: true) { retry in
+                            if retry { self.mountIfNeeded() }
+                        }
+                    } else {
+                        self.coolisMounted = true
+                        self.checkforMounted()
                     }
-                } else {
-                    self.coolisMounted = true
-                    self.checkforMounted()
+                    self.mountingThread = nil
                 }
-                self.mountingThread = nil
             }
+            thread.qualityOfService = .background
+            thread.name = "mounting"
+            thread.start()
+            self.mountingThread = thread
         }
-        thread.qualityOfService = .background
-        thread.name = "mounting"
-        thread.start()
-        mountingThread = thread
     }
 }
 
@@ -193,18 +205,6 @@ func isPairing() -> Bool {
 
 func checkDeviceConnection(callback: @escaping (Bool, String?) -> Void) {
     let targetIP = DeviceConnectionContext.targetIPAddress
-
-    // LocalDevVPN typically routes to a Mac/peer on the same local network.
-    // On cellular the VPN's outer interface is LTE and that peer is unreachable,
-    // which produces a TCP RST on 10.7.0.1:49152. Warn immediately so the user
-    // isn't left waiting 20s for a timeout that looks like a hung test.
-    if isActiveConnectionCellular() {
-        DispatchQueue.main.async {
-            callback(false, "Cellular data is active. Connect to the same WiFi network as your Mac/development peer and ensure LocalDevVPN is connected.")
-        }
-        return
-    }
-
     let host = NWEndpoint.Host(targetIP)
     // RemotePairing (RPPairing) port — matches heartbeat.m/location_simulation.c.
     // Port 62078 (lockdownd) is blocked by iOS 26.4+'s VPN-netmask restriction.
@@ -217,7 +217,10 @@ func checkDeviceConnection(callback: @escaping (Bool, String?) -> Void) {
             connection?.cancel()
             DispatchQueue.main.async {
                 if timeoutWorkItem?.isCancelled == false {
-                    let message = "[TIMEOUT] Could not reach the device at \(targetIP) over \(currentNetworkInterfaceDescription()). Make sure it’s online, on the same network, and LocalDevVPN is connected."
+                    var message = "[TIMEOUT] Could not reach the device at \(targetIP) over \(currentNetworkInterfaceDescription()). Make sure LocalDevVPN is connected."
+                    if isActiveConnectionCellular() {
+                        message += " On cellular, start LocalDevVPN, enable Airplane Mode, then turn cellular back on."
+                    }
                     callback(false, message)
                 }
             }
@@ -236,7 +239,10 @@ func checkDeviceConnection(callback: @escaping (Bool, String?) -> Void) {
             timeoutWorkItem?.cancel()
             connection?.cancel()
             DispatchQueue.main.async {
-                let message = "Could not reach the device at \(targetIP): \(error.localizedDescription)"
+                var message = "Could not reach the device at \(targetIP): \(error.localizedDescription)"
+                if isActiveConnectionCellular() {
+                    message += " On cellular, start LocalDevVPN, enable Airplane Mode, then turn cellular back on."
+                }
                 callback(false, message)
             }
         case .waiting(let error):

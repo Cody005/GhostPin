@@ -151,7 +151,7 @@ static JITEnableContext* sharedJITContext = nil;
         dispatch_semaphore_signal(semaphore);
     };
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         startHeartbeat(pairingFile, &self->g_adapter, &self->g_handshake, globalHeartbeatToken, Ccompletion);
     });
 

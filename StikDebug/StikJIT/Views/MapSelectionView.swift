@@ -157,6 +157,12 @@ struct LocationSimulationView: View {
     @State private var operationID = UUID()
     @State private var isSimulationActive = false
 
+    // Auto-retry state for the LocalDevVPN Airplane Mode workaround.
+    @State private var pendingRetryCoordinate: CLLocationCoordinate2D?
+    @State private var pendingRetryIsRoute = false
+    @State private var pendingRetryAttempts = 0
+    private let maxAutoRetryAttempts = 3
+
     private var pairingFilePath: String {
         URL.documentsDirectory.appendingPathComponent("pairingFile.plist").path
     }
@@ -551,6 +557,9 @@ struct LocationSimulationView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             refreshPairingStatus()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .networkPathChanged)) { _ in
+            handleNetworkPathChanged()
+        }
         .onChange(of: routeStops) { _, _ in
             saveRouteStops()
         }
@@ -634,80 +643,103 @@ struct LocationSimulationView: View {
 
     private func simulatePin() {
         guard pairingExists, let coord = coordinate, !isBusy else { return }
-        if isActiveConnectionCellular() {
-            alertTitle = "Cellular Network Active"
-            alertMessage = "Location simulation requires the same WiFi network as your Mac/development peer. LocalDevVPN cannot reach the RemotePairing listener over cellular data."
-            showAlert = true
-            return
-        }
-        guard ensureSimulationReady() else { return }
         isBusy = true
-        stopRouteStepping(keepSimulationAlive: false)
-        let currentOp = UUID()
-        operationID = currentOp
-        submitSimulation(for: coord) { code in
-            guard operationID == currentOp else { return }
-            isBusy = false
-            if code == 0 {
-                isSimulationActive = true
-                beginBackgroundTask()
-                startResendLoop()
-                if UserDefaults.standard.bool(forKey: "keepAliveAudio") {
-                    BackgroundAudioManager.shared.start()
+        operationID = UUID()
+        let flowOp = operationID
+        ensureSimulationReady { [self] ready in
+            guard operationID == flowOp else { return }
+            let coord = coord
+            guard ready else {
+                isBusy = false
+                if isActiveConnectionCellular() {
+                    pendingRetryCoordinate = coord
+                    pendingRetryIsRoute = false
+                    pendingRetryAttempts += 1
+                    alertTitle = "LocalDevVPN on Cellular"
+                    alertMessage = "Device support check failed over cellular. Quick fix: enable Airplane Mode, wait a second, then turn cellular back on. The app will retry automatically when the network changes (attempt \(pendingRetryAttempts)/\(maxAutoRetryAttempts))."
+                    showAlert = true
                 }
-                BackgroundLocationManager.shared.requestStart()
-            } else {
-                alertTitle = "Simulation Failed"
-                alertMessage = "Could not simulate location (error \(code)). Make sure the device is connected and the DDI is mounted."
-                showAlert = true
+                return
+            }
+            stopRouteStepping(keepSimulationAlive: false)
+            pendingRetryCoordinate = nil
+            pendingRetryAttempts = 0
+            let currentOp = UUID()
+            operationID = currentOp
+            submitSimulation(for: coord) { code in
+                guard operationID == currentOp else { return }
+                isBusy = false
+                if code == 0 {
+                    isSimulationActive = true
+                    showAlert = false
+                    beginBackgroundTask()
+                    startResendLoop()
+                    if UserDefaults.standard.bool(forKey: "keepAliveAudio") {
+                        BackgroundAudioManager.shared.start()
+                    }
+                    BackgroundLocationManager.shared.requestStart()
+                } else {
+                    handleSimulationFailure(code: code, coord: coord, isRoute: false)
+                }
             }
         }
     }
 
     private func startRoute() {
-        guard pairingExists else { return }
+        guard pairingExists, !isBusy else { return }
         guard !routeStops.isEmpty else {
             alertTitle = "Route Empty"
             alertMessage = "Add at least one stop before starting a route."
             showAlert = true
             return
         }
-        if isActiveConnectionCellular() {
-            alertTitle = "Cellular Network Active"
-            alertMessage = "Route simulation requires the same WiFi network as your Mac/development peer. LocalDevVPN cannot reach the RemotePairing listener over cellular data."
-            showAlert = true
-            return
-        }
-        guard ensureSimulationReady() else { return }
-
-        stopResendLoop()
         isBusy = true
-
-        if routeIndex >= routeStops.count {
-            routeIndex = 0
-        }
-
-        let firstStop = routeStops[routeIndex]
-        coordinate = firstStop.coordinate
-        let currentOp = UUID()
-        operationID = currentOp
-
-        submitSimulation(for: firstStop.coordinate) { code in
-            guard operationID == currentOp else { return }
-            isBusy = false
-            if code == 0 {
-                isSimulationActive = true
-                beginBackgroundTask()
-                if UserDefaults.standard.bool(forKey: "keepAliveAudio") {
-                    BackgroundAudioManager.shared.start()
+        operationID = UUID()
+        let flowOp = operationID
+        ensureSimulationReady { [self] ready in
+            guard operationID == flowOp else { return }
+            let firstStop = routeStops[routeIndex]
+            guard ready else {
+                isBusy = false
+                if isActiveConnectionCellular() {
+                    pendingRetryCoordinate = firstStop.coordinate
+                    pendingRetryIsRoute = true
+                    pendingRetryAttempts += 1
+                    alertTitle = "LocalDevVPN on Cellular"
+                    alertMessage = "Device support check failed over cellular. Quick fix: enable Airplane Mode, wait a second, then turn cellular back on. The app will retry automatically when the network changes (attempt \(pendingRetryAttempts)/\(maxAutoRetryAttempts))."
+                    showAlert = true
                 }
-                BackgroundLocationManager.shared.requestStart()
-                isRouteRunning = true
-                scheduleRouteTimer()
-            } else {
-                alertTitle = "Route Start Failed"
-                alertMessage = "Could not start route simulation (error \(code))."
-                showAlert = true
+                return
+            }
+
+            stopResendLoop()
+            pendingRetryCoordinate = nil
+            pendingRetryAttempts = 0
+
+            if routeIndex >= routeStops.count {
+                routeIndex = 0
+            }
+
+            coordinate = firstStop.coordinate
+            let currentOp = UUID()
+            operationID = currentOp
+
+            submitSimulation(for: firstStop.coordinate) { code in
+                guard operationID == currentOp else { return }
+                isBusy = false
+                if code == 0 {
+                    isSimulationActive = true
+                    showAlert = false
+                    beginBackgroundTask()
+                    if UserDefaults.standard.bool(forKey: "keepAliveAudio") {
+                        BackgroundAudioManager.shared.start()
+                    }
+                    BackgroundLocationManager.shared.requestStart()
+                    isRouteRunning = true
+                    scheduleRouteTimer()
+                } else {
+                    handleSimulationFailure(code: code, coord: firstStop.coordinate, isRoute: true)
+                }
             }
         }
     }
@@ -743,7 +775,9 @@ struct LocationSimulationView: View {
         let currentOp = operationID
         submitSimulation(for: nextStop.coordinate) { code in
             guard operationID == currentOp else { return }
-            if code != 0 {
+            if code == 0 {
+                showAlert = false
+            } else {
                 stopRouteStepping(keepSimulationAlive: true)
                 alertTitle = "Route Step Failed"
                 alertMessage = "Failed at stop \(nextIndex + 1) (error \(code))."
@@ -761,6 +795,44 @@ struct LocationSimulationView: View {
         }
     }
 
+    private func handleSimulationFailure(code: Int32, coord: CLLocationCoordinate2D, isRoute: Bool) {
+        // IPA_ERR_RPPAIRING_TUNNEL (3) on cellular usually means LocalDevVPN
+        // bound to the LTE interface. Stash the coordinate so we can auto-retry
+        // when the network path changes (Airplane Mode workaround).
+        if code == 3 && isActiveConnectionCellular() {
+            pendingRetryCoordinate = coord
+            pendingRetryIsRoute = isRoute
+            pendingRetryAttempts += 1
+            alertTitle = isRoute ? "Route Start Failed" : "Simulation Failed"
+            alertMessage = "LocalDevVPN failed to create the tunnel over cellular. Quick fix: enable Airplane Mode, wait a second, then turn cellular back on. The app will retry automatically when the network changes (attempt \(pendingRetryAttempts)/\(maxAutoRetryAttempts))."
+            showAlert = true
+        } else {
+            pendingRetryCoordinate = nil
+            pendingRetryAttempts = 0
+            alertTitle = isRoute ? "Route Start Failed" : "Simulation Failed"
+            alertMessage = "Could not \(isRoute ? "start route" : "simulate location") (error \(code)). Make sure the device is connected and the DDI is mounted."
+            showAlert = true
+        }
+    }
+
+    private func handleNetworkPathChanged() {
+        guard pendingRetryCoordinate != nil, !isBusy else { return }
+        guard pendingRetryAttempts < maxAutoRetryAttempts else {
+            pendingRetryCoordinate = nil
+            pendingRetryAttempts = 0
+            return
+        }
+
+        // A path change happened while we were waiting for the Airplane Mode
+        // workaround. Retry the original action so ensureSimulationReady gets
+        // another chance to mount/verify the DDI over the now-correct VPN path.
+        if pendingRetryIsRoute {
+            startRoute()
+        } else {
+            simulatePin()
+        }
+    }
+
     private func submitSimulation(for coord: CLLocationCoordinate2D, completion: @escaping (Int32) -> Void) {
         let ip = deviceIP
         let path = pairingFilePath
@@ -775,13 +847,14 @@ struct LocationSimulationView: View {
         }
     }
 
-    private func ensureSimulationReady() -> Bool {
+    private func ensureSimulationReady(completion: @escaping (Bool) -> Void) {
         let targetIP = deviceIP
         guard !targetIP.isEmpty else {
             alertTitle = "Missing Target IP"
             alertMessage = "Set a target IP in Settings before simulating."
             showAlert = true
-            return false
+            completion(false)
+            return
         }
 
         guard FileManager.default.fileExists(atPath: pairingFilePath), isPairing() else {
@@ -789,18 +862,28 @@ struct LocationSimulationView: View {
             alertTitle = "Invalid Pairing File"
             alertMessage = "Import a valid pairingFile.plist in Settings, then try again."
             showAlert = true
-            return false
+            completion(false)
+            return
         }
 
-        guard isMounted() else {
-            MountingProgress.shared.pubMount()
-            alertTitle = "Preparing Device Support"
-            alertMessage = "Developer Disk Image is not mounted yet. Please wait a few seconds and try Simulate again."
-            showAlert = true
-            return false
+        // Run the DDI mount check off the main thread. isMounted() can block
+        // for several seconds while startHeartbeat creates the RemotePairing
+        // tunnel, and doing that on the main thread causes priority inversion
+        // warnings (user-interactive thread waiting on background Rust worker).
+        DispatchQueue.global(qos: .utility).async {
+            let mounted = isMounted()
+            DispatchQueue.main.async {
+                if mounted {
+                    completion(true)
+                } else {
+                    MountingProgress.shared.pubMount()
+                    self.alertTitle = "Preparing Device Support"
+                    self.alertMessage = "Developer Disk Image is not mounted yet. Please wait a few seconds and try Simulate again."
+                    self.showAlert = true
+                    completion(false)
+                }
+            }
         }
-
-        return true
     }
 
     private func clear() {
