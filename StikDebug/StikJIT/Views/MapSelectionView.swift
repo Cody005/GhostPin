@@ -83,6 +83,7 @@ struct LocationBookmark: Identifiable, Codable, Equatable {
 final class LocationSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
     @Published var results: [MKLocalSearchCompletion] = []
     private let completer = MKLocalSearchCompleter()
+    private var debounceWorkItem: DispatchWorkItem?
 
     override init() {
         super.init()
@@ -91,7 +92,17 @@ final class LocationSearchCompleter: NSObject, ObservableObject, MKLocalSearchCo
     }
 
     func update(query: String) {
-        completer.queryFragment = query
+        debounceWorkItem?.cancel()
+        if query.isEmpty {
+            results = []
+            completer.queryFragment = ""
+            return
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.completer.queryFragment = query
+        }
+        debounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
     }
 
     nonisolated func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
@@ -138,6 +149,8 @@ struct LocationSimulationView: View {
     @State private var alertMessage = ""
 
     @State private var searchText = ""
+    @State private var isSearchActive = false
+    @FocusState private var searchFieldIsFocused: Bool
     @StateObject private var searchCompleter = LocationSearchCompleter()
 
     // Bookmarks
@@ -202,6 +215,10 @@ struct LocationSimulationView: View {
             .mapStyle(.standard(elevation: .flat))
             .onTapGesture { point in
                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isSearchActive = false
+                    searchFieldIsFocused = false
+                }
                 if let loc = proxy.convert(point, from: .local) {
                     if coordinate == nil {
                         pinDropped = false
@@ -229,38 +246,49 @@ struct LocationSimulationView: View {
     @ViewBuilder
     private var searchResultsList: some View {
         if !searchCompleter.results.isEmpty {
-            if #available(iOS 26, *) {
-                searchList
-                    .glassEffect(in: .rect(cornerRadius: 12))
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-            } else {
-                searchList
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-            }
+            searchList
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
         }
     }
 
     private var searchList: some View {
-        List(searchCompleter.results.prefix(5), id: \.self) { result in
-            Button {
-                selectSearchResult(result)
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(result.title)
-                        .font(.subheadline)
-                    if !result.subtitle.isEmpty {
-                        Text(result.subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+        let results = searchCompleter.results.prefix(5)
+        let last = results.last
+
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(results, id: \.self) { result in
+                Button {
+                    selectSearchResult(result)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(result.title)
+                            .font(.subheadline)
+                        if !result.subtitle.isEmpty {
+                            Text(result.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if let lastResult = last, !(result === lastResult) {
+                    Divider()
+                        .background(Color.white.opacity(0.12))
                 }
             }
         }
-        .listStyle(.plain)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+        )
         .frame(maxHeight: 350)
-        .scrollDisabled(true)
     }
 
     private func modeChip(_ mode: SimulationMode) -> some View {
@@ -299,43 +327,64 @@ struct LocationSimulationView: View {
         .buttonStyle(.plain)
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 10) {
+    private var searchField: some View {
+        HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.secondary)
             TextField("Search location...", text: $searchText)
                 .autocorrectionDisabled()
                 .foregroundStyle(.primary)
+                .focused($searchFieldIsFocused)
+                .disabled(!isSearchActive)
                 .onChange(of: searchText) { _, newValue in
                     searchCompleter.update(query: newValue)
                 }
-            if !searchText.isEmpty {
-                Button {
+            Button {
+                if searchText.isEmpty {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isSearchActive = false
+                        searchFieldIsFocused = false
+                    }
+                } else {
                     searchText = ""
-                    searchCompleter.results = []
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                    searchCompleter.update(query: "")
                 }
-                .buttonStyle(.plain)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .opacity(searchText.isEmpty ? 0.3 : 1)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.15), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var floatingMapControls: some View {
-        VStack(spacing: 12) {
+    private var topBar: some View {
+        HStack(spacing: 0) {
+            Menu {
+                Button {
+                    showBookmarks = true
+                } label: {
+                    Label("Bookmarks", systemImage: "bookmark.fill")
+                }
+                Button {
+                    showRouteManager = true
+                } label: {
+                    Label("Route Stops", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(width: 46, height: 46)
+
             Button {
                 if let coord = coordinate {
                     withAnimation(.easeInOut(duration: 0.35)) {
@@ -346,15 +395,11 @@ struct LocationSimulationView: View {
                 Image(systemName: "mappin.circle")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(.primary)
-                    .frame(width: 46, height: 46)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .frame(width: 46, height: 46)
             .disabled(coordinate == nil)
             .opacity(coordinate == nil ? 0.45 : 1)
 
@@ -366,16 +411,47 @@ struct LocationSimulationView: View {
                 Image(systemName: "location.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.primary)
-                    .frame(width: 46, height: 46)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .frame(width: 46, height: 46)
+
+            ZStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        isSearchActive = true
+                        searchFieldIsFocused = true
+                    }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isSearchActive)
+                .opacity(isSearchActive ? 0 : 1)
+                .scaleEffect(isSearchActive ? 0.8 : 1)
+
+                searchField
+                    .opacity(isSearchActive ? 1 : 0)
+                    .scaleEffect(isSearchActive ? 1 : 0.9)
+            }
+            .frame(maxWidth: isSearchActive ? .infinity : 46, maxHeight: 46)
+            .animation(.easeInOut(duration: 0.25), value: isSearchActive)
+            .contentShape(Rectangle())
         }
+        .padding(4)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
+        .padding(.horizontal, 16)
+        .offset(y: -20)
     }
 
     private var controlPanel: some View {
@@ -649,36 +725,15 @@ struct LocationSimulationView: View {
         ZStack(alignment: .bottom) {
             mapLayer
             VStack(spacing: 12) {
-                searchBar
+                topBar
                 searchResultsList
                 Spacer()
-                controlPanel
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            floatingMapControls
-                .padding(.top, 70)
-                .padding(.trailing, 16)
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Menu {
-                    Button {
-                        showBookmarks = true
-                    } label: {
-                        Label("Bookmarks", systemImage: "bookmark.fill")
-                    }
-                    Button {
-                        showRouteManager = true
-                    } label: {
-                        Label("Route Stops", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                    }
-                } label: {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
+                if coordinate != nil || isRouteRunning || !routeStops.isEmpty {
+                    controlPanel
                 }
             }
         }
+        .navigationBarTitleDisplayMode(.inline)
         .alert(alertTitle, isPresented: $showAlert) {
             Button("OK", role: .cancel) { }
         } message: {
