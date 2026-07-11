@@ -198,6 +198,7 @@ struct LocationSimulationView: View {
                     }
                 }
             }
+            .environment(\.colorScheme, .dark)
             .mapStyle(.standard(elevation: .flat))
             .onTapGesture { point in
                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -298,6 +299,85 @@ struct LocationSimulationView: View {
         .buttonStyle(.plain)
     }
 
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField("Search location...", text: $searchText)
+                .autocorrectionDisabled()
+                .foregroundStyle(.primary)
+                .onChange(of: searchText) { _, newValue in
+                    searchCompleter.update(query: newValue)
+                }
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                    searchCompleter.results = []
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+    }
+
+    private var floatingMapControls: some View {
+        VStack(spacing: 12) {
+            Button {
+                if let coord = coordinate {
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        position = .region(MKCoordinateRegion(center: coord, latitudinalMeters: 1000, longitudinalMeters: 1000))
+                    }
+                }
+            } label: {
+                Image(systemName: "mappin.circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 46, height: 46)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+            }
+            .buttonStyle(.plain)
+            .disabled(coordinate == nil)
+            .opacity(coordinate == nil ? 0.45 : 1)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    position = .userLocation(fallback: .automatic)
+                }
+            } label: {
+                Image(systemName: "location.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 46, height: 46)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     private var controlPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
@@ -308,22 +388,33 @@ struct LocationSimulationView: View {
             .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             if !pairingExists {
-                Label("No pairing file — import in Settings", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text("Pairing file required")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
             }
 
             if let coord = coordinate {
-                HStack(spacing: 6) {
-                    Text(String(format: "%.6f, %.6f", coord.latitude, coord.longitude))
-                        .font(.footnote.monospaced())
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Image(systemName: "mappin.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Selected Pin")
+                            .font(.subheadline.weight(.semibold))
+                        Text(String(format: "%.6f, %.6f", coord.latitude, coord.longitude))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
                     if isSimulationActive {
                         Text("LIVE")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
                             .background(.green, in: Capsule())
                     }
                     if isBusy {
@@ -331,10 +422,19 @@ struct LocationSimulationView: View {
                             .controlSize(.small)
                     }
                 }
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                )
             } else {
-                Text("Tap map to drop pin")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Image(systemName: "hand.tap.fill")
+                    Text("Tap the map to drop a pin")
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
             }
 
             if simulationMode == .pin {
@@ -344,65 +444,74 @@ struct LocationSimulationView: View {
             }
         }
         .padding(18)
-        .background {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.18), Color.black.opacity(0.08)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(Color.white.opacity(0.20), lineWidth: 1)
-                }
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
-        }
+        .background(
+            .ultraThinMaterial,
+            in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.white.opacity(0.20), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.30), radius: 24, x: 0, y: 12)
         .padding(.bottom, 24)
         .padding(.horizontal, 16)
     }
 
     private var pinControls: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button(action: clear) {
                 Label("Stop", systemImage: "stop.fill")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 14)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(red: 0.92, green: 0.28, blue: 0.30), Color(red: 0.75, green: 0.18, blue: 0.35)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
+                    .foregroundStyle(.white)
+                    .shadow(color: .red.opacity(0.25), radius: 8, x: 0, y: 4)
             }
             .buttonStyle(.plain)
-            .background(Color.red.opacity(0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .foregroundStyle(.red)
+            .disabled(!isSimulationActive)
+            .opacity(isSimulationActive ? 1 : 0.45)
 
             Button(action: simulatePin) {
-                Label("Simulate", systemImage: "location.fill")
+                Label("Simulate", systemImage: "play.fill")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 14)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
+                    .foregroundStyle(.white)
+                    .shadow(color: Color(red: 0.19, green: 0.63, blue: 0.94).opacity(0.35), radius: 10, x: 0, y: 4)
             }
             .buttonStyle(.plain)
-            .background(
-                LinearGradient(
-                    colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-            )
-            .foregroundStyle(.white)
-            .disabled(!pairingExists || isBusy || coordinate == nil)
-            .opacity((!pairingExists || isBusy || coordinate == nil) ? 0.45 : 1)
+            .disabled(!pairingExists || isBusy || coordinate == nil || isSimulationActive)
+            .opacity((!pairingExists || isBusy || coordinate == nil || isSimulationActive) ? 0.45 : 1)
 
             Button {
                 showSaveBookmark = true
             } label: {
                 Image(systemName: "bookmark.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 44, height: 44)
-                    .background(Color.blue.opacity(0.18), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 48, height: 48)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                    )
                     .foregroundStyle(.blue)
+                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
             }
             .buttonStyle(.plain)
             .disabled(coordinate == nil)
@@ -411,12 +520,44 @@ struct LocationSimulationView: View {
     }
 
     private var routeControls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(routeStatusText)
+        VStack(alignment: .leading, spacing: 12) {
+            if !routeStops.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                    Text(routeStatusText)
+                        .lineLimit(1)
+                    Spacer()
+                    if isSimulationActive {
+                        Text("LIVE")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.green, in: Capsule())
+                    }
+                    if isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                )
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: "hand.tap.fill")
+                    Text("Tap the map to add route stops")
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            }
 
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 Button {
                     if isRouteRunning {
                         stopRouteStepping(keepSimulationAlive: true)
@@ -424,46 +565,62 @@ struct LocationSimulationView: View {
                         startRoute()
                     }
                 } label: {
-                    Label(isRouteRunning ? "Pause Route" : "Start Route", systemImage: isRouteRunning ? "pause.fill" : "play.fill")
+                    Label(isRouteRunning ? "Pause" : "Start", systemImage: isRouteRunning ? "pause.fill" : "play.fill")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                        .padding(.vertical, 14)
+                        .background(
+                            LinearGradient(
+                                colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                        .foregroundStyle(.white)
+                        .shadow(color: Color(red: 0.19, green: 0.63, blue: 0.94).opacity(0.35), radius: 10, x: 0, y: 4)
                 }
                 .buttonStyle(.plain)
-                .background(
-                    LinearGradient(
-                        colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
-                .foregroundStyle(.white)
-                .disabled(!pairingExists || routeStops.isEmpty)
-                .opacity((!pairingExists || routeStops.isEmpty) ? 0.45 : 1)
+                .disabled(!pairingExists || routeStops.isEmpty || isBusy)
+                .opacity((!pairingExists || routeStops.isEmpty || isBusy) ? 0.45 : 1)
 
                 Button(action: clear) {
                     Label("Stop", systemImage: "stop.fill")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                        .padding(.vertical, 14)
+                        .background(
+                            LinearGradient(
+                                colors: [Color(red: 0.92, green: 0.28, blue: 0.30), Color(red: 0.75, green: 0.18, blue: 0.35)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                        .foregroundStyle(.white)
+                        .shadow(color: .red.opacity(0.25), radius: 8, x: 0, y: 4)
                 }
                 .buttonStyle(.plain)
-                .background(Color.red.opacity(0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .foregroundStyle(.red)
+                .disabled(!isRouteRunning)
+                .opacity(isRouteRunning ? 1 : 0.45)
             }
 
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 Button {
                     addCurrentCoordinateToRoute()
                 } label: {
-                    Label("Add Stop", systemImage: "plus")
-                        .font(.subheadline.weight(.medium))
+                    Label("Add", systemImage: "plus")
+                        .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 12)
                 }
                 .buttonStyle(.plain)
-                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                )
+                .foregroundStyle(.primary)
                 .disabled(coordinate == nil)
                 .opacity(coordinate == nil ? 0.45 : 1)
 
@@ -471,12 +628,17 @@ struct LocationSimulationView: View {
                     showRouteManager = true
                 } label: {
                     Label("Manage", systemImage: "slider.horizontal.3")
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 12)
                 }
                 .buttonStyle(.plain)
-                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                )
+                .foregroundStyle(.primary)
             }
         }
     }
@@ -487,10 +649,16 @@ struct LocationSimulationView: View {
         ZStack(alignment: .bottom) {
             mapLayer
             VStack(spacing: 12) {
+                searchBar
                 searchResultsList
                 Spacer()
                 controlPanel
             }
+        }
+        .overlay(alignment: .topTrailing) {
+            floatingMapControls
+                .padding(.top, 70)
+                .padding(.trailing, 16)
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -509,14 +677,6 @@ struct LocationSimulationView: View {
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease.circle")
                 }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                TextField("Search location...", text: $searchText)
-                    .padding(.leading, 6)
-                    .autocorrectionDisabled()
-                    .onChange(of: searchText) { _, newValue in
-                        searchCompleter.update(query: newValue)
-                    }
             }
         }
         .alert(alertTitle, isPresented: $showAlert) {
@@ -1010,6 +1170,7 @@ struct CustomPinView: View, Equatable {
                 .offset(y: 2)
         }
         .compositingGroup()
+        .shadow(color: Color.black.opacity(0.25), radius: 6, x: 0, y: 4)
     }
 }
 
