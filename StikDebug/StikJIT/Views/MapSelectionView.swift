@@ -472,47 +472,6 @@ struct LocationSimulationView: View {
                 .foregroundStyle(.orange)
             }
 
-            if let coord = coordinate {
-                HStack(spacing: 10) {
-                    Image(systemName: "mappin.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.red)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Selected Pin")
-                            .font(.subheadline.weight(.semibold))
-                        Text(String(format: "%.6f, %.6f", coord.latitude, coord.longitude))
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if isSimulationActive {
-                        Text("LIVE")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.green, in: Capsule())
-                    }
-                    if isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                .padding(12)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                )
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "hand.tap.fill")
-                    Text("Tap the map to drop a pin")
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            }
-
             if simulationMode == .pin {
                 pinControls
             } else {
