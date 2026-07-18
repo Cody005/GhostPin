@@ -220,7 +220,7 @@ struct LocationSimulationView: View {
     private var currentMapStyle: MapStyle {
         switch mapStyleChoice {
         case .standardCinematic:
-            return .standard(elevation: .realistic, emphasis: .muted, pointsOfInterest: .all, showsTraffic: false)
+            return .standard(elevation: .realistic, emphasis: .automatic, pointsOfInterest: .all, showsTraffic: false)
         case .hybridSatellite:
             return .hybrid(elevation: .realistic, pointsOfInterest: .all, showsTraffic: false)
         }
