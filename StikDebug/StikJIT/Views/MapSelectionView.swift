@@ -15,55 +15,6 @@ extension CLLocationCoordinate2D: @retroactive Equatable {
     }
 }
 
-struct RouteStopsView: View {
-    @Binding var routeStops: [LocationBookmark]
-    let bookmarks: [LocationBookmark]
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if routeStops.isEmpty {
-                    ContentUnavailableView(
-                        "No Route Stops",
-                        systemImage: "point.3.filled.connected.trianglepath.dotted",
-                        description: Text("Use Add Stop from the simulator screen or copy from bookmarks.")
-                    )
-                } else {
-                    ForEach(routeStops) { stop in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(stop.name)
-                            Text(String(format: "%.6f, %.6f", stop.latitude, stop.longitude))
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .onMove { fromOffsets, toOffset in
-                        routeStops.move(fromOffsets: fromOffsets, toOffset: toOffset)
-                    }
-                    .onDelete { offsets in
-                        routeStops.remove(atOffsets: offsets)
-                    }
-                }
-            }
-            .navigationTitle("Route Stops")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if !bookmarks.isEmpty {
-                        Button("Use Bookmarks") {
-                            routeStops = bookmarks
-                        }
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    EditButton()
-                }
-            }
-        }
-    }
-
-}
-
 // MARK: - Bookmark Model
 
 struct LocationBookmark: Identifiable, Codable, Equatable {
@@ -126,13 +77,6 @@ struct LocationSimulationView: View {
     private static let locationQueue = DispatchQueue(label: "com.stik.location-sim",
                                                     qos: .utility)
 
-    private enum SimulationMode: String, CaseIterable, Identifiable {
-        case pin = "Pin"
-        case route = "Route"
-
-        var id: String { rawValue }
-    }
-
     @AppStorage("routeStepInterval") private var routeStepInterval = 6.0
     @AppStorage("routeLoopEnabled") private var routeLoopEnabled = true
 
@@ -153,16 +97,8 @@ struct LocationSimulationView: View {
     @FocusState private var searchFieldIsFocused: Bool
     @StateObject private var searchCompleter = LocationSearchCompleter()
 
-    // Bookmarks
-    @State private var bookmarks: [LocationBookmark] = []
-    @State private var showBookmarks = false
-    @State private var showSaveBookmark = false
-    @State private var newBookmarkName = ""
-
     // Route simulation
-    @State private var simulationMode: SimulationMode = .pin
     @State private var routeStops: [LocationBookmark] = []
-    @State private var showRouteManager = false
     @State private var routeTimer: Timer?
     @State private var routeIndex = 0
     @State private var isRouteRunning = false
@@ -208,14 +144,6 @@ struct LocationSimulationView: View {
     private var deviceIP: String {
         let stored = UserDefaults.standard.string(forKey: "customTargetIP") ?? ""
         return stored.isEmpty ? "10.7.0.1" : stored
-    }
-
-    private var routeStatusText: String {
-        guard !routeStops.isEmpty else { return "No route stops yet" }
-        if isRouteRunning {
-            return "Running stop \(routeIndex + 1) of \(routeStops.count)"
-        }
-        return "\(routeStops.count) stops ready"
     }
 
     // MARK: - Extracted Subviews
@@ -650,7 +578,6 @@ struct LocationSimulationView: View {
             }
             .onAppear {
                 refreshPairingStatus()
-                loadBookmarks()
                 loadRouteStops()
             }
             .onReceive(NotificationCenter.default.publisher(for: .pairingFileImported)) { _ in
@@ -845,32 +772,7 @@ struct LocationSimulationView: View {
         }
     }
 
-    // MARK: - Bookmarks
-
-    private func loadBookmarks() {
-        guard let data = UserDefaults.standard.data(forKey: "locationBookmarks"),
-              let decoded = try? JSONDecoder().decode([LocationBookmark].self, from: data) else { return }
-        bookmarks = decoded
-    }
-
-    private func saveBookmarks() {
-        if let data = try? JSONEncoder().encode(bookmarks) {
-            UserDefaults.standard.set(data, forKey: "locationBookmarks")
-        }
-    }
-
-    private func addBookmark() {
-        guard let coord = coordinate else { return }
-        let name = newBookmarkName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let bookmark = LocationBookmark(
-            name: name.isEmpty ? String(format: "%.4f, %.4f", coord.latitude, coord.longitude) : name,
-            latitude: coord.latitude,
-            longitude: coord.longitude
-        )
-        bookmarks.append(bookmark)
-        saveBookmarks()
-        newBookmarkName = ""
-    }
+    // MARK: - Route Persistence
 
     private func loadRouteStops() {
         guard let data = UserDefaults.standard.data(forKey: "routeStops"),
@@ -884,16 +786,6 @@ struct LocationSimulationView: View {
         if let data = try? JSONEncoder().encode(routeStops) {
             UserDefaults.standard.set(data, forKey: "routeStops")
         }
-    }
-
-    private func addCurrentCoordinateToRoute() {
-        guard let coord = coordinate else { return }
-        let stop = LocationBookmark(
-            name: "Stop \(routeStops.count + 1)",
-            latitude: coord.latitude,
-            longitude: coord.longitude
-        )
-        routeStops.append(stop)
     }
 
     // MARK: - Location
@@ -1230,144 +1122,6 @@ struct LocationSimulationView: View {
     private func stopResendLoop() {
         resendTimer?.invalidate()
         resendTimer = nil
-    }
-}
-
-// MARK: - Custom Pin
-
-struct CustomPinView: View, Equatable {
-    var isActive: Bool
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pulse = false
-
-    static func == (lhs: CustomPinView, rhs: CustomPinView) -> Bool {
-        lhs.isActive == rhs.isActive
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                // Restrained pulsing halo when simulation is live
-                if isActive {
-                    Circle()
-                        .stroke(Color.green.opacity(0.45), lineWidth: 2.5)
-                        .frame(width: 46, height: 46)
-                        .scaleEffect(pulse ? 1.35 : 0.95)
-                        .opacity(pulse ? 0 : 0.9)
-                        .animation(
-                            reduceMotion ? nil : .easeOut(duration: 1.6).repeatForever(autoreverses: false),
-                            value: pulse
-                        )
-                        .onAppear {
-                            guard !reduceMotion else { return }
-                            pulse = true
-                        }
-                        .onDisappear { pulse = false }
-                    Circle()
-                        .stroke(Color.green.opacity(0.5), lineWidth: 3)
-                        .frame(width: 48, height: 48)
-                }
-
-                // Outer pin body
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: isActive
-                                ? [Color(red: 0.18, green: 0.82, blue: 0.58), Color(red: 0.12, green: 0.62, blue: 0.90)]
-                                : [Color(red: 0.93, green: 0.30, blue: 0.32), Color(red: 0.82, green: 0.18, blue: 0.40)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 38, height: 38)
-
-                // Inner icon
-                Image(systemName: isActive ? "location.fill" : "mappin")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-
-            // Pin tail
-            Triangle()
-                .fill(
-                    LinearGradient(
-                        colors: isActive
-                            ? [Color(red: 0.12, green: 0.62, blue: 0.90), Color(red: 0.12, green: 0.62, blue: 0.90).opacity(0.5)]
-                            : [Color(red: 0.82, green: 0.18, blue: 0.40), Color(red: 0.82, green: 0.18, blue: 0.40).opacity(0.5)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: 14, height: 10)
-                .offset(y: -2)
-
-            // Ground shadow dot
-            Ellipse()
-                .fill(Color.black.opacity(0.18))
-                .frame(width: 18, height: 6)
-                .offset(y: 2)
-        }
-        .compositingGroup()
-        .shadow(color: Color.black.opacity(0.25), radius: 6, x: 0, y: 4)
-    }
-}
-
-// Pin tail shape
-private struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        path.closeSubpath()
-        return path
-    }
-}
-
-// MARK: - Bookmarks Sheet
-
-struct BookmarksView: View {
-    @Binding var bookmarks: [LocationBookmark]
-    let onSelect: (LocationBookmark) -> Void
-    let onDelete: (IndexSet) -> Void
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if bookmarks.isEmpty {
-                    ContentUnavailableView(
-                        "No Bookmarks",
-                        systemImage: "bookmark.slash",
-                        description: Text("Drop a pin on the map and tap the bookmark icon to save a location.")
-                    )
-                } else {
-                    List {
-                        ForEach(bookmarks) { bookmark in
-                            Button {
-                                onSelect(bookmark)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(bookmark.name)
-                                        .foregroundStyle(.primary)
-                                    Text(String(format: "%.6f, %.6f", bookmark.latitude, bookmark.longitude))
-                                        .font(.caption.monospaced())
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .onDelete(perform: onDelete)
-                    }
-                }
-            }
-            .navigationTitle("Bookmarks")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                if !bookmarks.isEmpty {
-                    EditButton()
-                }
-            }
-        }
     }
 }
 
