@@ -170,6 +170,24 @@ struct LocationSimulationView: View {
     @State private var operationID = UUID()
     @State private var isSimulationActive = false
 
+    // Redesigned frontend state
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var mapScope
+    @State private var selectedPlaceName: String?
+    @State private var selectedPlaceSubtitle: String?
+    @State private var mapStyleChoice: MapStyleChoice = .standardCinematic
+    @State private var is3DActive = false
+    @State private var currentCamera: MapCamera?
+    @State private var lookAroundScene: MKLookAroundScene?
+    @State private var lookAroundTask: Task<Void, Never>?
+    @State private var isLookAroundDismissed = false
+    @State private var geocoder = CLGeocoder()
+
+    /// Optional real weather values provided by the app. The capsule stays
+    /// hidden when no value exists — no weather service is added here.
+    var weatherSymbolName: String?
+    var weatherTemperatureText: String?
+
     // Auto-retry state for the LocalDevVPN Airplane Mode workaround.
     @State private var pendingRetryCoordinate: CLLocationCoordinate2D?
     @State private var pendingRetryIsRoute = false
@@ -199,550 +217,546 @@ struct LocationSimulationView: View {
 
     // MARK: - Extracted Subviews
 
+    private var currentMapStyle: MapStyle {
+        switch mapStyleChoice {
+        case .standardCinematic:
+            return .standard(elevation: .realistic, emphasis: .muted, pointsOfInterest: .all, showsTraffic: false)
+        case .hybridSatellite:
+            return .hybrid(elevation: .realistic, pointsOfInterest: .all, showsTraffic: false)
+        }
+    }
+
     private var mapLayer: some View {
         MapReader { proxy in
-            Map(position: $position) {
+            Map(position: $position, scope: mapScope) {
+                UserAnnotation()
                 if let coordinate {
                     Annotation("", coordinate: coordinate, anchor: .bottom) {
                         EquatableView(content: CustomPinView(isActive: isSimulationActive))
                             .scaleEffect(pinDropped ? 1 : 0.3)
                             .opacity(pinDropped ? 1 : 0)
-                            .animation(.spring(response: 0.35, dampingFraction: 0.55), value: pinDropped)
+                            .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.55), value: pinDropped)
+                            .accessibilityLabel(selectedPlaceName ?? "Selected location")
                     }
                 }
             }
-            .environment(\.colorScheme, .dark)
-            .mapStyle(.standard(elevation: .flat))
+            .mapStyle(currentMapStyle)
+            .onMapCameraChange(frequency: .onEnd) { context in
+                currentCamera = context.camera
+                is3DActive = context.camera.pitch > 5
+            }
             .onTapGesture { point in
-                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isSearchActive = false
-                    searchFieldIsFocused = false
-                }
+                collapseSearch()
                 if let loc = proxy.convert(point, from: .local) {
-                    if coordinate == nil {
-                        pinDropped = false
-                        coordinate = loc
-                        withAnimation { pinDropped = true }
-                    } else {
-                        coordinate = loc
-                    }
+                    handleMapTap(at: loc)
                 }
-            }
-            .mapControls {
-                MapCompass()
             }
         }
         .ignoresSafeArea()
         .onChange(of: coordinate) { _, new in
             guard shouldCenterOnCoordinate, let new else { return }
             shouldCenterOnCoordinate = false
-            withAnimation(.easeInOut(duration: 0.4)) {
-                position = .region(MKCoordinateRegion(center: new, latitudinalMeters: 1000, longitudinalMeters: 1000))
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.6)) {
+                position = .camera(MapCamera(centerCoordinate: new, distance: 1600, heading: 0, pitch: 35))
             }
         }
     }
 
     @ViewBuilder
-    private var searchResultsList: some View {
-        if !searchCompleter.results.isEmpty {
-            searchList
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-        }
-    }
+    private var suggestionList: some View {
+        if isSearchActive && !searchText.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                if searchCompleter.results.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        Text("No Results")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 14)
+                    .padding(.horizontal, 16)
+                } else {
+                    let results = Array(searchCompleter.results.prefix(6))
+                    ForEach(results, id: \.self) { result in
+                        Button {
+                            selectSearchResult(result)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "mappin.circle.fill")
+                                    .font(.title3)
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(result.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.primary)
+                                    if !result.subtitle.isEmpty {
+                                        Text(result.subtitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 14)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
 
-    private var searchList: some View {
-        let results = searchCompleter.results.prefix(5)
-        let last = results.last
-
-        return VStack(alignment: .leading, spacing: 0) {
-            ForEach(results, id: \.self) { result in
-                Button {
-                    selectSearchResult(result)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(result.title)
-                            .font(.subheadline)
-                        if !result.subtitle.isEmpty {
-                            Text(result.subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        if result != results.last {
+                            Divider()
+                                .padding(.leading, 52)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 12)
-                    .contentShape(Rectangle())
+                }
+            }
+            .simGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .frame(maxHeight: 320)
+        }
+    }
+
+    private var mapControlStack: some View {
+        VStack(spacing: 12) {
+            MapControlButton(
+                symbol: mapStyleChoice == .hybridSatellite ? "globe.americas.fill" : "map",
+                label: "Map style",
+                hint: "Switches between the standard map and satellite imagery",
+                isSelected: mapStyleChoice == .hybridSatellite
+            ) {
+                mapStyleChoice = mapStyleChoice == .standardCinematic ? .hybridSatellite : .standardCinematic
+            }
+
+            MapControlButton(
+                symbol: "view.3d",
+                label: "3D map",
+                hint: "Toggles the tilted three-dimensional camera",
+                isSelected: is3DActive
+            ) {
+                toggle3D()
+            }
+
+            MapControlButton(
+                symbol: "location",
+                label: "Current location",
+                hint: "Centers the map on your current location"
+            ) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.5)) {
+                    position = .userLocation(fallback: .automatic)
+                }
+            }
+
+            MapCompass(scope: mapScope)
+        }
+    }
+
+    @ViewBuilder
+    private var lookAroundControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if lookAroundScene != nil && !isLookAroundDismissed && !isSearchActive {
+                lookAroundCard
+                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
+            }
+            if lookAroundScene != nil && !isSearchActive {
+                MapControlButton(
+                    symbol: "binoculars.fill",
+                    label: "Look Around",
+                    hint: "Shows a street-level preview of the selected location",
+                    isSelected: !isLookAroundDismissed
+                ) {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8)) {
+                        isLookAroundDismissed.toggle()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var lookAroundCard: some View {
+        LookAroundPreview(scene: $lookAroundScene)
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .frame(maxWidth: 230)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+            )
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8)) {
+                        isLookAroundDismissed = true
+                    }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white, .black.opacity(0.45))
                 }
                 .buttonStyle(.plain)
-
-                if let lastResult = last, !(result === lastResult) {
-                    Divider()
-                        .background(Color.white.opacity(0.12))
-                }
+                .padding(6)
+                .accessibilityLabel("Close Look Around preview")
             }
-        }
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.15), lineWidth: 1)
-        )
-        .frame(maxHeight: 350)
+            .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 5)
+            .accessibilityLabel("Look Around preview. Tap to expand.")
     }
 
-    private func modeChip(_ mode: SimulationMode) -> some View {
-        let isActive = simulationMode == mode
-        return Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                simulationMode = mode
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: mode == .pin ? "mappin.and.ellipse" : "point.3.connected.trianglepath.dotted")
-                    .font(.caption)
-                Text(mode.rawValue)
-                    .font(.subheadline.weight(.semibold))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .foregroundStyle(isActive ? .white : .primary)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(
-                        isActive
-                            ? LinearGradient(
-                                colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            : LinearGradient(
-                                colors: [Color.white.opacity(0.20), Color.white.opacity(0.08)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 6) {
+    private var searchBar: some View {
+        HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(.secondary)
-            TextField("Search location...", text: $searchText)
+
+            TextField("Search for a place", text: $searchText)
                 .autocorrectionDisabled()
-                .foregroundStyle(.primary)
+                .submitLabel(.search)
                 .focused($searchFieldIsFocused)
-                .disabled(!isSearchActive)
                 .onChange(of: searchText) { _, newValue in
                     searchCompleter.update(query: newValue)
                 }
-            Button {
-                if searchText.isEmpty {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isSearchActive = false
-                        searchFieldIsFocused = false
-                    }
-                } else {
+
+            if !searchText.isEmpty {
+                Button {
                     searchText = ""
                     searchCompleter.update(query: "")
-                }
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .opacity(searchText.isEmpty ? 0.3 : 1)
-        }
-        .padding(.horizontal, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var topBar: some View {
-        HStack(spacing: 0) {
-            Menu {
-                Button {
-                    showBookmarks = true
                 } label: {
-                    Label("Bookmarks", systemImage: "bookmark.fill")
-                }
-                Button {
-                    showRouteManager = true
-                } label: {
-                    Label("Route Stops", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                }
-            } label: {
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .frame(width: 46, height: 46)
-
-            Button {
-                if let coord = coordinate {
-                    withAnimation(.easeInOut(duration: 0.35)) {
-                        position = .region(MKCoordinateRegion(center: coord, latitudinalMeters: 1000, longitudinalMeters: 1000))
-                    }
-                }
-            } label: {
-                Image(systemName: "mappin.circle")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .frame(width: 46, height: 46)
-            .disabled(coordinate == nil)
-            .opacity(coordinate == nil ? 0.45 : 1)
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    position = .userLocation(fallback: .automatic)
-                }
-            } label: {
-                Image(systemName: "location.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .frame(width: 46, height: 46)
-
-            ZStack {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        isSearchActive = true
-                        searchFieldIsFocused = true
-                    }
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .contentShape(Rectangle())
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 44)
                 }
                 .buttonStyle(.plain)
-                .disabled(isSearchActive)
-                .opacity(isSearchActive ? 0 : 1)
-                .scaleEffect(isSearchActive ? 0.8 : 1)
-
-                searchField
-                    .opacity(isSearchActive ? 1 : 0)
-                    .scaleEffect(isSearchActive ? 1 : 0.9)
+                .accessibilityLabel("Clear search text")
+            } else if isSearchActive {
+                Button("Cancel") {
+                    collapseSearch()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
             }
-            .frame(maxWidth: isSearchActive ? .infinity : 46, maxHeight: 46)
-            .animation(.easeInOut(duration: 0.25), value: isSearchActive)
-            .contentShape(Rectangle())
         }
-        .padding(4)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Color.white.opacity(0.15), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
         .padding(.horizontal, 16)
-        .offset(y: -20)
+        .frame(minHeight: 52)
+        .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .simGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous), interactive: true)
+        .onTapGesture {
+            guard !isSearchActive else { return }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                isSearchActive = true
+            }
+            searchFieldIsFocused = true
+        }
     }
 
-    private var controlPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                modeChip(.pin)
-                modeChip(.route)
+    private var selectedTitleText: String {
+        if let selectedPlaceName { return selectedPlaceName }
+        if let coordinate { return String(format: "%.5f, %.5f", coordinate.latitude, coordinate.longitude) }
+        return ""
+    }
+
+    private var selectedSubtitleText: String {
+        if let selectedPlaceSubtitle { return selectedPlaceSubtitle }
+        if let coordinate { return String(format: "%.5f, %.5f", coordinate.latitude, coordinate.longitude) }
+        return ""
+    }
+
+    private var actionCard: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "mappin.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.white, Color.accentColor)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selectedTitleText)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(selectedSubtitleText)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                        isSearchActive = true
+                    }
+                    searchFieldIsFocused = true
+                }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Searches for a different place")
+
+                if isSimulationActive {
+                    SimulationStatusBadge()
+                } else {
+                    Button {
+                        clearSelection()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear selected location")
+                }
             }
-            .padding(4)
-            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            primaryActionButton
 
             if !pairingExists {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                    Text("Pairing file required")
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.orange)
-            }
-
-            if simulationMode == .pin {
-                pinControls
-            } else {
-                routeControls
+                Label("Import a pairing file in Settings to enable simulation", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(18)
-        .background(
-            .ultraThinMaterial,
-            in: RoundedRectangle(cornerRadius: 28, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(Color.white.opacity(0.20), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.30), radius: 24, x: 0, y: 12)
-        .padding(.bottom, 24)
-        .padding(.horizontal, 16)
+        .padding(16)
+        .simGlass(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 
-    private var pinControls: some View {
-        HStack(spacing: 12) {
-            Button(action: clear) {
-                Label("Stop", systemImage: "stop.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        LinearGradient(
-                            colors: [Color(red: 0.92, green: 0.28, blue: 0.30), Color(red: 0.75, green: 0.18, blue: 0.35)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    )
-                    .foregroundStyle(.white)
-                    .shadow(color: .red.opacity(0.25), radius: 8, x: 0, y: 4)
-            }
-            .buttonStyle(.plain)
-            .disabled(!isSimulationActive)
-            .opacity(isSimulationActive ? 1 : 0.45)
-
-            Button(action: simulatePin) {
-                Label("Simulate", systemImage: "play.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        LinearGradient(
-                            colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    )
-                    .foregroundStyle(.white)
-                    .shadow(color: Color(red: 0.19, green: 0.63, blue: 0.94).opacity(0.35), radius: 10, x: 0, y: 4)
-            }
-            .buttonStyle(.plain)
-            .disabled(!pairingExists || isBusy || coordinate == nil || isSimulationActive)
-            .opacity((!pairingExists || isBusy || coordinate == nil || isSimulationActive) ? 0.45 : 1)
-
-            Button {
-                showSaveBookmark = true
+    @ViewBuilder
+    private var primaryActionButton: some View {
+        if isSimulationActive {
+            let stopButton = Button(role: .destructive) {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                stopSimulation()
             } label: {
-                Image(systemName: "bookmark.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 48, height: 48)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                    )
-                    .foregroundStyle(.blue)
-                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                Label("Stop", systemImage: "stop.fill")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 34)
             }
-            .buttonStyle(.plain)
-            .disabled(coordinate == nil)
-            .opacity(coordinate == nil ? 0.45 : 1)
-        }
-    }
-
-    private var routeControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if !routeStops.isEmpty {
+            if #available(iOS 26.0, *) {
+                stopButton
+                    .buttonStyle(.glassProminent)
+                    .tint(.red)
+            } else {
+                stopButton
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+            }
+        } else {
+            let simulateButton = Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                simulatePin()
+            } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "point.3.filled.connected.trianglepath.dotted")
-                    Text(routeStatusText)
-                        .lineLimit(1)
-                    Spacer()
-                    if isSimulationActive {
-                        Text("LIVE")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.green, in: Capsule())
-                    }
                     if isBusy {
                         ProgressView()
                             .controlSize(.small)
-                    }
-                }
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(12)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                )
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "hand.tap.fill")
-                    Text("Tap the map to add route stops")
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 12) {
-                Button {
-                    if isRouteRunning {
-                        stopRouteStepping(keepSimulationAlive: true)
+                        Text("Starting…")
+                            .font(.headline)
                     } else {
-                        startRoute()
+                        Label("Simulate", systemImage: "play.fill")
+                            .font(.headline)
                     }
-                } label: {
-                    Label(isRouteRunning ? "Pause" : "Start", systemImage: isRouteRunning ? "pause.fill" : "play.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(
-                            LinearGradient(
-                                colors: [Color(red: 0.19, green: 0.63, blue: 0.94), Color(red: 0.22, green: 0.86, blue: 0.66)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                        .foregroundStyle(.white)
-                        .shadow(color: Color(red: 0.19, green: 0.63, blue: 0.94).opacity(0.35), radius: 10, x: 0, y: 4)
                 }
-                .buttonStyle(.plain)
-                .disabled(!pairingExists || routeStops.isEmpty || isBusy)
-                .opacity((!pairingExists || routeStops.isEmpty || isBusy) ? 0.45 : 1)
-
-                Button(action: clear) {
-                    Label("Stop", systemImage: "stop.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(
-                            LinearGradient(
-                                colors: [Color(red: 0.92, green: 0.28, blue: 0.30), Color(red: 0.75, green: 0.18, blue: 0.35)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                        .foregroundStyle(.white)
-                        .shadow(color: .red.opacity(0.25), radius: 8, x: 0, y: 4)
-                }
-                .buttonStyle(.plain)
-                .disabled(!isRouteRunning)
-                .opacity(isRouteRunning ? 1 : 0.45)
+                .frame(maxWidth: .infinity, minHeight: 34)
             }
-
-            HStack(spacing: 12) {
-                Button {
-                    addCurrentCoordinateToRoute()
-                } label: {
-                    Label("Add", systemImage: "plus")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.plain)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                )
-                .foregroundStyle(.primary)
-                .disabled(coordinate == nil)
-                .opacity(coordinate == nil ? 0.45 : 1)
-
-                Button {
-                    showRouteManager = true
-                } label: {
-                    Label("Manage", systemImage: "slider.horizontal.3")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.plain)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                )
-                .foregroundStyle(.primary)
+            .disabled(!pairingExists || isBusy || coordinate == nil)
+            if #available(iOS 26.0, *) {
+                simulateButton
+                    .buttonStyle(.glassProminent)
+                    .tint(Color.accentColor)
+            } else {
+                simulateButton
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.accentColor)
             }
         }
+    }
+
+    private var bottomPanel: some View {
+        VStack(spacing: 12) {
+            lookAroundControls
+
+            if isSearchActive {
+                suggestionList
+            }
+
+            if coordinate != nil && !isSearchActive {
+                actionCard
+            } else {
+                searchBar
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: isSearchActive)
+        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: coordinate == nil)
+        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: isSimulationActive)
+        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: lookAroundScene == nil)
+        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: isLookAroundDismissed)
     }
 
     // MARK: - Body
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            mapLayer
-            VStack(spacing: 12) {
-                topBar
-                searchResultsList
-                Spacer()
-                if coordinate != nil || isRouteRunning || !routeStops.isEmpty {
-                    controlPanel
+        mapLayer
+            .overlay(alignment: .topLeading) {
+                WeatherCapsuleView(symbolName: weatherSymbolName, temperatureText: weatherTemperatureText)
+                    .padding(.leading, 16)
+                    .padding(.top, 8)
+            }
+            .overlay(alignment: .topTrailing) {
+                mapControlStack
+                    .padding(.trailing, 12)
+                    .padding(.top, 8)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                bottomPanel
+            }
+            .mapScope(mapScope)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .navigationBar)
+            .alert(alertTitle, isPresented: $showAlert) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(alertMessage)
+            }
+            .onChange(of: isSimulationActive) { _, active in
+                if active {
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                 }
             }
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .alert(alertTitle, isPresented: $showAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(alertMessage)
-        }
-        .alert("Save Bookmark", isPresented: $showSaveBookmark) {
-            TextField("Name", text: $newBookmarkName)
-            Button("Save") { addBookmark() }
-            Button("Cancel", role: .cancel) { newBookmarkName = "" }
-        } message: {
-            Text("Enter a name for this location.")
-        }
-        .sheet(isPresented: $showBookmarks) {
-            BookmarksView(bookmarks: $bookmarks) { bookmark in
-                pinDropped = false
-                shouldCenterOnCoordinate = true
-                coordinate = bookmark.coordinate
-                withAnimation { pinDropped = true }
-                showBookmarks = false
-            } onDelete: { offsets in
-                bookmarks.remove(atOffsets: offsets)
-                saveBookmarks()
+            .onChange(of: searchFieldIsFocused) { _, focused in
+                if focused && !isSearchActive {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                        isSearchActive = true
+                    }
+                }
             }
+            .onAppear {
+                refreshPairingStatus()
+                loadBookmarks()
+                loadRouteStops()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pairingFileImported)) { _ in
+                refreshPairingStatus()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                refreshPairingStatus()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .networkPathChanged)) { _ in
+                handleNetworkPathChanged()
+            }
+            .onChange(of: routeStops) { _, _ in
+                saveRouteStops()
+            }
+            .onDisappear {
+                stopResendLoop()
+                stopRouteStepping(keepSimulationAlive: false)
+                BackgroundAudioManager.shared.stop()
+                BackgroundLocationManager.shared.requestStop()
+                endBackgroundTask()
+                lookAroundTask?.cancel()
+                geocoder.cancelGeocode()
+            }
+    }
+
+    // MARK: - Frontend Interactions
+
+    private func collapseSearch() {
+        searchFieldIsFocused = false
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+            isSearchActive = false
         }
-        .sheet(isPresented: $showRouteManager) {
-            RouteStopsView(routeStops: $routeStops, bookmarks: bookmarks)
+    }
+
+    private func handleMapTap(at loc: CLLocationCoordinate2D) {
+        let isFirstPin = coordinate == nil
+        if isFirstPin { pinDropped = false }
+        coordinate = loc
+        if isFirstPin { withAnimation { pinDropped = true } }
+        UISelectionFeedbackGenerator().selectionChanged()
+        updatePlaceDetails(for: loc)
+        if isSimulationActive {
+            pushLiveLocationUpdate(loc)
         }
-        .onAppear {
-            refreshPairingStatus()
-            loadBookmarks()
-            loadRouteStops()
+    }
+
+    private func clearSelection() {
+        guard !isSimulationActive else { return }
+        coordinate = nil
+        pinDropped = false
+        selectedPlaceName = nil
+        selectedPlaceSubtitle = nil
+        lookAroundTask?.cancel()
+        lookAroundScene = nil
+        isLookAroundDismissed = false
+        geocoder.cancelGeocode()
+    }
+
+    /// Stops the simulation via the existing `clear()` flow but keeps the
+    /// selected location and place details visible in the ready state.
+    private func stopSimulation() {
+        let keptCoordinate = coordinate
+        let keptName = selectedPlaceName
+        let keptSubtitle = selectedPlaceSubtitle
+        clear()
+        coordinate = keptCoordinate
+        selectedPlaceName = keptName
+        selectedPlaceSubtitle = keptSubtitle
+        if keptCoordinate != nil { pinDropped = true }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    private func updatePlaceDetails(for coord: CLLocationCoordinate2D) {
+        selectedPlaceName = nil
+        selectedPlaceSubtitle = nil
+        reverseGeocode(coord)
+        requestLookAroundScene(for: coord)
+    }
+
+    private func reverseGeocode(_ coord: CLLocationCoordinate2D) {
+        geocoder.cancelGeocode()
+        let location = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        geocoder.reverseGeocodeLocation(location) { placemarks, _ in
+            guard let placemark = placemarks?.first, coordinate == coord else { return }
+            selectedPlaceName = placemark.name ?? placemark.thoroughfare ?? placemark.locality
+            let parts = [placemark.locality, placemark.administrativeArea, placemark.country].compactMap { $0 }
+            selectedPlaceSubtitle = parts.isEmpty ? nil : parts.joined(separator: ", ")
         }
-        .onReceive(NotificationCenter.default.publisher(for: .pairingFileImported)) { _ in
-            refreshPairingStatus()
+    }
+
+    private func requestLookAroundScene(for coord: CLLocationCoordinate2D) {
+        lookAroundTask?.cancel()
+        lookAroundScene = nil
+        isLookAroundDismissed = false
+        lookAroundTask = Task { @MainActor in
+            let scene = try? await MKLookAroundSceneRequest(coordinate: coord).scene
+            guard !Task.isCancelled else { return }
+            lookAroundScene = scene
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-            refreshPairingStatus()
+    }
+
+    /// While simulation is active, pushes the new coordinate to the device
+    /// using the existing `simulate_location` fast path (the same call the
+    /// resend loop uses) — no full start workflow, no confirmation.
+    private func pushLiveLocationUpdate(_ coord: CLLocationCoordinate2D) {
+        let ip = deviceIP
+        let path = pairingFilePath
+        Self.locationQueue.async {
+            _ = simulate_location(ip, coord.latitude, coord.longitude, path)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .networkPathChanged)) { _ in
-            handleNetworkPathChanged()
-        }
-        .onChange(of: routeStops) { _, _ in
-            saveRouteStops()
-        }
-        .onDisappear {
-            stopResendLoop()
-            stopRouteStepping(keepSimulationAlive: false)
-            BackgroundAudioManager.shared.stop()
-            BackgroundLocationManager.shared.requestStop()
-            endBackgroundTask()
+    }
+
+    private func toggle3D() {
+        guard let camera = currentCamera else { return }
+        is3DActive.toggle()
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.5)) {
+            position = .camera(
+                MapCamera(
+                    centerCoordinate: camera.centerCoordinate,
+                    distance: camera.distance,
+                    heading: camera.heading,
+                    pitch: is3DActive ? 60 : 0
+                )
+            )
         }
     }
 
@@ -800,7 +814,7 @@ struct LocationSimulationView: View {
     // MARK: - Location
 
     private func selectSearchResult(_ result: MKLocalSearchCompletion) {
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        collapseSearch()
         searchText = ""
         searchCompleter.results = []
 
@@ -810,7 +824,14 @@ struct LocationSimulationView: View {
                 pinDropped = false
                 shouldCenterOnCoordinate = true
                 coordinate = item.placemark.coordinate
+                selectedPlaceName = item.name ?? result.title
+                selectedPlaceSubtitle = result.subtitle.isEmpty ? nil : result.subtitle
                 withAnimation { pinDropped = true }
+                UISelectionFeedbackGenerator().selectionChanged()
+                requestLookAroundScene(for: item.placemark.coordinate)
+                if isSimulationActive {
+                    pushLiveLocationUpdate(item.placemark.coordinate)
+                }
             }
         }
     }
@@ -1130,6 +1151,9 @@ struct LocationSimulationView: View {
 struct CustomPinView: View, Equatable {
     var isActive: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulse = false
+
     static func == (lhs: CustomPinView, rhs: CustomPinView) -> Bool {
         lhs.isActive == rhs.isActive
     }
@@ -1137,8 +1161,20 @@ struct CustomPinView: View, Equatable {
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                // Glow ring when simulation is live
+                // Restrained pulsing halo when simulation is live
                 if isActive {
+                    Circle()
+                        .stroke(Color.green.opacity(0.45), lineWidth: 2.5)
+                        .frame(width: 46, height: 46)
+                        .scaleEffect(pulse ? 1.35 : 0.95)
+                        .opacity(pulse ? 0 : 0.9)
+                        .onAppear {
+                            guard !reduceMotion else { return }
+                            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                                pulse = true
+                            }
+                        }
+                        .onDisappear { pulse = false }
                     Circle()
                         .stroke(Color.green.opacity(0.5), lineWidth: 3)
                         .frame(width: 48, height: 48)
@@ -1243,5 +1279,120 @@ struct BookmarksView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Redesigned UI Components
+
+enum MapStyleChoice {
+    case standardCinematic
+    case hybridSatellite
+}
+
+/// Liquid Glass surface on iOS 26+, with a native material fallback on
+/// the project's older supported iOS versions.
+extension View {
+    @ViewBuilder
+    func simGlass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+        } else {
+            self
+                .background(.ultraThinMaterial, in: shape)
+                .overlay(shape.stroke(Color.primary.opacity(0.12), lineWidth: 1))
+                .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 4)
+        }
+    }
+}
+
+private struct MapControlPressStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.92 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Circular floating glass control used for the map-style, 3D, recenter
+/// and Look Around buttons.
+struct MapControlButton: View {
+    let symbol: String
+    let label: String
+    let hint: String
+    var isSelected: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            action()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                .frame(width: 46, height: 46)
+                .contentShape(Circle())
+        }
+        .buttonStyle(MapControlPressStyle())
+        .simGlass(in: Circle(), interactive: true)
+        .accessibilityLabel(label)
+        .accessibilityHint(hint)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+/// Compact floating capsule showing real weather values supplied by the
+/// app. Hidden entirely when no value exists.
+struct WeatherCapsuleView: View {
+    let symbolName: String?
+    let temperatureText: String?
+
+    var body: some View {
+        if let symbolName {
+            HStack(spacing: 6) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .symbolRenderingMode(.multicolor)
+                if let temperatureText {
+                    Text(temperatureText)
+                        .font(.footnote.weight(.semibold))
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 34)
+            .simGlass(in: Capsule())
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Current weather\(temperatureText.map { ", \($0)" } ?? "")")
+        }
+    }
+}
+
+/// Small green indicator shown in the action card while simulation is live.
+struct SimulationStatusBadge: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(.green)
+                .frame(width: 8, height: 8)
+                .opacity(pulse ? 0.5 : 1)
+                .onAppear {
+                    guard !reduceMotion else { return }
+                    withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+                        pulse = true
+                    }
+                }
+            Text("Simulating")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.green)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.green.opacity(0.12), in: Capsule())
+        .accessibilityLabel("Simulation active")
     }
 }
