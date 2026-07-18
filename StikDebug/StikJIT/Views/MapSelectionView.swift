@@ -180,7 +180,7 @@ struct LocationSimulationView: View {
     @State private var currentCamera: MapCamera?
     @State private var lookAroundScene: MKLookAroundScene?
     @State private var lookAroundTask: Task<Void, Never>?
-    @State private var isLookAroundDismissed = false
+    @State private var isLookAroundDismissed = true
     @State private var geocoder = CLGeocoder()
 
     /// Optional real weather values provided by the app. The capsule stays
@@ -687,7 +687,7 @@ struct LocationSimulationView: View {
         selectedPlaceSubtitle = nil
         lookAroundTask?.cancel()
         lookAroundScene = nil
-        isLookAroundDismissed = false
+        isLookAroundDismissed = true
         geocoder.cancelGeocode()
     }
 
@@ -726,7 +726,7 @@ struct LocationSimulationView: View {
     private func requestLookAroundScene(for coord: CLLocationCoordinate2D) {
         lookAroundTask?.cancel()
         lookAroundScene = nil
-        isLookAroundDismissed = false
+        isLookAroundDismissed = true
         lookAroundTask = Task { @MainActor in
             let scene = try? await MKLookAroundSceneRequest(coordinate: coord).scene
             guard !Task.isCancelled else { return }
@@ -1168,11 +1168,13 @@ struct CustomPinView: View, Equatable {
                         .frame(width: 46, height: 46)
                         .scaleEffect(pulse ? 1.35 : 0.95)
                         .opacity(pulse ? 0 : 0.9)
+                        .animation(
+                            reduceMotion ? nil : .easeOut(duration: 1.6).repeatForever(autoreverses: false),
+                            value: pulse
+                        )
                         .onAppear {
                             guard !reduceMotion else { return }
-                            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
-                                pulse = true
-                            }
+                            pulse = true
                         }
                         .onDisappear { pulse = false }
                     Circle()

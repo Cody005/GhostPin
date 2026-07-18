@@ -53,9 +53,6 @@ struct MainTabView: View {
                 .transition(.opacity)
             }
         }
-        .onAppear {
-            showWelcome = true
-        }
     }
 
 }
