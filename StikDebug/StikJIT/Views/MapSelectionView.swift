@@ -182,6 +182,9 @@ struct LocationSimulationView: View {
     @State private var lookAroundTask: Task<Void, Never>?
     @State private var isLookAroundDismissed = true
     @State private var geocoder = CLGeocoder()
+    @State private var pinSymbol: String?
+    @State private var pinTint: Color = .red
+    @State private var mapSelection: MapSelection<Int>?
 
     /// Optional real weather values provided by the app. The capsule stays
     /// hidden when no value exists — no weather service is added here.
@@ -228,19 +231,30 @@ struct LocationSimulationView: View {
 
     private var mapLayer: some View {
         MapReader { proxy in
-            Map(position: $position, scope: mapScope) {
-                UserAnnotation()
-                if let coordinate {
-                    Annotation("", coordinate: coordinate, anchor: .bottom) {
-                        EquatableView(content: CustomPinView(isActive: isSimulationActive))
-                            .scaleEffect(pinDropped ? 1 : 0.3)
-                            .opacity(pinDropped ? 1 : 0)
-                            .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.55), value: pinDropped)
-                            .accessibilityLabel(selectedPlaceName ?? "Selected location")
+            Map(position: $position, selection: $mapSelection, scope: mapScope) {
+                if !isSimulationActive {
+                    UserAnnotation()
+                }
+                if let coordinate, mapSelection?.feature == nil {
+                    if let pinSymbol {
+                        Marker(selectedPlaceName ?? "", systemImage: pinSymbol, coordinate: coordinate)
+                            .tint(isSimulationActive ? .green : pinTint)
+                            .tag(MapSelection(1))
+                    } else if isSimulationActive {
+                        Marker(selectedPlaceName ?? "", coordinate: coordinate)
+                            .tint(.green)
+                            .tag(MapSelection(1))
+                    } else {
+                        // No tint override: Marker's default is Apple Maps' exact pin red.
+                        Marker(selectedPlaceName ?? "", coordinate: coordinate)
+                            .tag(MapSelection(1))
                     }
                 }
             }
             .mapStyle(currentMapStyle)
+            .mapFeatureSelectionDisabled { feature in
+                feature.kind != .pointOfInterest
+            }
             .onMapCameraChange(frequency: .onEnd) { context in
                 currentCamera = context.camera
                 is3DActive = context.camera.pitch > 5
@@ -253,6 +267,10 @@ struct LocationSimulationView: View {
             }
         }
         .ignoresSafeArea()
+        .onChange(of: mapSelection) { _, newValue in
+            guard let feature = newValue?.feature else { return }
+            adoptMapFeature(feature)
+        }
         .onChange(of: coordinate) { _, new in
             guard shouldCenterOnCoordinate, let new else { return }
             shouldCenterOnCoordinate = false
@@ -667,15 +685,46 @@ struct LocationSimulationView: View {
         }
     }
 
+    /// Defers briefly so that when the tap lands on a POI, MapKit's native
+    /// feature selection (the Apple Maps balloon) wins and no custom pin is
+    /// dropped on top of it.
     private func handleMapTap(at loc: CLLocationCoordinate2D) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard mapSelection?.feature == nil else { return }
+            dropPin(at: loc)
+        }
+    }
+
+    private func dropPin(at loc: CLLocationCoordinate2D) {
         let isFirstPin = coordinate == nil
         if isFirstPin { pinDropped = false }
         coordinate = loc
+        mapSelection = nil
         if isFirstPin { withAnimation { pinDropped = true } }
         UISelectionFeedbackGenerator().selectionChanged()
         updatePlaceDetails(for: loc)
         if isSimulationActive {
             pushLiveLocationUpdate(loc)
+        }
+        // Select the marker a beat after it appears so MapKit plays its
+        // native selection pop animation, like Apple Maps' dropped pin.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            guard coordinate == loc, mapSelection?.feature == nil else { return }
+            withAnimation { mapSelection = MapSelection(1) }
+        }
+    }
+
+    /// Adopts a natively selected map feature (POI) as the simulation target.
+    /// MapKit renders the selected balloon itself, exactly like Apple Maps.
+    private func adoptMapFeature(_ feature: MapFeature) {
+        coordinate = feature.coordinate
+        selectedPlaceName = feature.title
+        selectedPlaceSubtitle = nil
+        UISelectionFeedbackGenerator().selectionChanged()
+        reverseGeocode(feature.coordinate)
+        requestLookAroundScene(for: feature.coordinate)
+        if isSimulationActive {
+            pushLiveLocationUpdate(feature.coordinate)
         }
     }
 
@@ -683,6 +732,7 @@ struct LocationSimulationView: View {
         guard !isSimulationActive else { return }
         coordinate = nil
         pinDropped = false
+        mapSelection = nil
         selectedPlaceName = nil
         selectedPlaceSubtitle = nil
         lookAroundTask?.cancel()
@@ -708,7 +758,10 @@ struct LocationSimulationView: View {
     private func updatePlaceDetails(for coord: CLLocationCoordinate2D) {
         selectedPlaceName = nil
         selectedPlaceSubtitle = nil
+        pinSymbol = nil
+        pinTint = .red
         reverseGeocode(coord)
+        lookUpPointOfInterest(near: coord)
         requestLookAroundScene(for: coord)
     }
 
@@ -717,10 +770,42 @@ struct LocationSimulationView: View {
         let location = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
         geocoder.reverseGeocodeLocation(location) { placemarks, _ in
             guard let placemark = placemarks?.first, coordinate == coord else { return }
-            selectedPlaceName = placemark.name ?? placemark.thoroughfare ?? placemark.locality
+            if selectedPlaceName == nil {
+                selectedPlaceName = placemark.name ?? placemark.thoroughfare ?? placemark.locality
+            }
             let parts = [placemark.locality, placemark.administrativeArea, placemark.country].compactMap { $0 }
             selectedPlaceSubtitle = parts.isEmpty ? nil : parts.joined(separator: ", ")
         }
+    }
+
+    /// Finds the closest point of interest around the tapped coordinate so
+    /// the pin can adopt its name, icon and color — matching how Apple Maps
+    /// highlights the POI you tapped.
+    private func lookUpPointOfInterest(near coord: CLLocationCoordinate2D) {
+        let request = MKLocalPointsOfInterestRequest(center: coord, radius: 60)
+        MKLocalSearch(request: request).start { response, _ in
+            guard coordinate == coord, let items = response?.mapItems, !items.isEmpty else { return }
+            let tapped = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+            let nearest = items.min { a, b in
+                let da = CLLocation(latitude: a.placemark.coordinate.latitude, longitude: a.placemark.coordinate.longitude).distance(from: tapped)
+                let db = CLLocation(latitude: b.placemark.coordinate.latitude, longitude: b.placemark.coordinate.longitude).distance(from: tapped)
+                return da < db
+            }
+            guard let nearest else { return }
+            let distance = CLLocation(
+                latitude: nearest.placemark.coordinate.latitude,
+                longitude: nearest.placemark.coordinate.longitude
+            ).distance(from: tapped)
+            guard distance <= 40 else { return }
+            selectedPlaceName = nearest.name
+            applyPinStyle(for: nearest.pointOfInterestCategory)
+        }
+    }
+
+    private func applyPinStyle(for category: MKPointOfInterestCategory?) {
+        let style = poiPinStyle(for: category)
+        pinSymbol = style.symbol
+        pinTint = style.tint
     }
 
     private func requestLookAroundScene(for coord: CLLocationCoordinate2D) {
@@ -824,8 +909,10 @@ struct LocationSimulationView: View {
                 pinDropped = false
                 shouldCenterOnCoordinate = true
                 coordinate = item.placemark.coordinate
+                mapSelection = MapSelection(1)
                 selectedPlaceName = item.name ?? result.title
                 selectedPlaceSubtitle = result.subtitle.isEmpty ? nil : result.subtitle
+                applyPinStyle(for: item.pointOfInterestCategory)
                 withAnimation { pinDropped = true }
                 UISelectionFeedbackGenerator().selectionChanged()
                 requestLookAroundScene(for: item.placemark.coordinate)
@@ -1289,6 +1376,50 @@ struct BookmarksView: View {
 enum MapStyleChoice {
     case standardCinematic
     case hybridSatellite
+}
+
+/// Maps a point-of-interest category to the SF Symbol and tint Apple Maps
+/// uses for its markers, so the dropped pin matches the tapped map icon.
+func poiPinStyle(for category: MKPointOfInterestCategory?) -> (symbol: String?, tint: Color) {
+    guard let category else { return (nil, .red) }
+    switch category {
+    case .restaurant: return ("fork.knife", .orange)
+    case .cafe: return ("cup.and.saucer.fill", .orange)
+    case .bakery: return ("birthday.cake.fill", .orange)
+    case .foodMarket: return ("cart.fill", .orange)
+    case .winery, .brewery: return ("wineglass.fill", .purple)
+    case .nightlife: return ("figure.dance", .pink)
+    case .store: return ("bag.fill", .yellow)
+    case .gasStation: return ("fuelpump.fill", .blue)
+    case .evCharger: return ("bolt.fill", .green)
+    case .parking: return ("parkingsign", .blue)
+    case .carRental: return ("car.fill", .blue)
+    case .publicTransport: return ("bus.fill", .blue)
+    case .airport: return ("airplane", .blue)
+    case .hotel: return ("bed.double.fill", .purple)
+    case .hospital: return ("cross.fill", .red)
+    case .pharmacy: return ("pills.fill", .red)
+    case .police: return ("shield.fill", .blue)
+    case .fireStation: return ("flame.fill", .red)
+    case .postOffice: return ("envelope.fill", .blue)
+    case .bank, .atm: return ("banknote.fill", .green)
+    case .school, .university: return ("graduationcap.fill", .brown)
+    case .library: return ("books.vertical.fill", .brown)
+    case .museum: return ("building.columns.fill", .pink)
+    case .theater: return ("theatermasks.fill", .pink)
+    case .movieTheater: return ("film.fill", .pink)
+    case .amusementPark: return ("sparkles", .pink)
+    case .zoo: return ("pawprint.fill", .orange)
+    case .aquarium: return ("fish.fill", .blue)
+    case .park, .nationalPark: return ("tree.fill", .green)
+    case .beach: return ("beach.umbrella.fill", .cyan)
+    case .marina: return ("sailboat.fill", .blue)
+    case .campground: return ("tent.fill", .green)
+    case .stadium: return ("sportscourt.fill", .green)
+    case .fitnessCenter: return ("dumbbell.fill", .mint)
+    case .laundry: return ("washer.fill", .blue)
+    default: return (nil, .red)
+    }
 }
 
 /// Liquid Glass surface on iOS 26+, with a native material fallback on
